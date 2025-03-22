@@ -92,13 +92,13 @@ jobs:
     # It uses the `tags` and `labels` parameters to tag and label the image with the output from the "meta" step.
     - name: Build and push Docker image
       id: push
-#      uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
-      uses: docker/build-push-action@v5
+      uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+#      uses: docker/build-push-action@v5
       with:
         context: .
         push: true
         platforms: linux/amd64,linux/arm64,linux/arm,linux/riscv64
-        tags: slaclab/local-path-provisioner:${{ github.ref_name }}
+        tags: ${{ env.REGISTRY }}:slaclab/local-path-provisioner:${{ github.ref_name }}
         file: package/Dockerfile
         labels: ${{ steps.meta.outputs.labels }}
     
