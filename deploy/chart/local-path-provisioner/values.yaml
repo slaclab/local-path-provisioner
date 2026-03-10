@@ -6,7 +6,7 @@ namespaceOverride: ""
 
 image:
   repository: rancher/local-path-provisioner
-  tag: v0.0.31
+  tag: v0.0.35
   pullPolicy: IfNotPresent
 
 helperImage:
@@ -48,6 +48,12 @@ storageClass:
 
   ## volumeBindingMode field controls when volume binding and dynamic provisioning should occur, can be  "Immediate" or "WaitForFirstConsumer"
   volumeBindingMode: WaitForFirstConsumer
+
+  ## allowedTopologies field controls on which nodes the volumes can be dynamically provisioned, an empty value means no topology constraints
+  allowedTopologies: []
+
+  ## annotations to add to the StorageClass
+  annotations: {}
 
   ## Set a path pattern, if unset the default will be used
   # pathPattern: "{{ .PVC.Namespace }}-{{ .PVC.Name }}"
@@ -91,12 +97,14 @@ nodePathMap:
 #     sharedFileSystemPath: ""
 #     ## OR
 #     # See above
-#     nodePathMap: {}
-    
+#     nodePathMap: []
+
 podAnnotations: {}
 
 podSecurityContext: {}
   # runAsNonRoot: true
+
+hostUsers: true
 
 securityContext: {}
   # allowPrivilegeEscalation: false
@@ -146,6 +154,16 @@ tolerations: []
 
 affinity: {}
 
+# Priority class name for the pod
+priorityClassName: ""
+
+podDisruptionBudget:
+  enabled: false
+  # Select either maxUnavailable or minAvailable
+  #maxUnavailable:
+  #minAvailable:
+  #unhealthyPodEvictionPolicy: IfHealthyBudget
+
 configmap:
   # specify the config map name
   name: local-path-config
@@ -163,6 +181,9 @@ configmap:
     namespaceOverride: ""
     name: "helper-pod"
     annotations: {}
+    tolerations: []
+    # Priority class name for the helper pod (defaults to system-node-critical)
+    priorityClassName: "system-node-critical"
 # Number of provisioner worker threads to call provision/delete simultaneously.
 # workerThreads: 4
 
@@ -171,3 +192,6 @@ configmap:
 
 # Number of retries of failed volume deletion. 0 means retry indefinitely.
 # deletionRetryCount: 15
+
+# Extra arguments to pass to the CLI
+extraArgs: []

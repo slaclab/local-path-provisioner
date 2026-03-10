@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,7 +18,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 
-	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v10/controller"
+	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v11/controller"
 )
 
 var (
@@ -49,10 +49,12 @@ var (
 	FlagDeletionRetryCount        = "deletion-retry-count"
 	DefaultDeletionRetryCount     = pvController.DefaultFailedDeleteThreshold
 	EnvConfigMountPath            = "CONFIG_MOUNT_PATH"
+	FlagKubeClientBurst           = "kube-client-burst"
+	FlagKubeClientQPS             = "kube-client-qps"
 )
 
 func cmdNotFound(_ *cli.Context, command string) {
-	panic(fmt.Errorf("Unrecognized command: %s", command))
+	panic(fmt.Errorf("unrecognized command: %s", command))
 }
 
 func onUsageError(_ *cli.Context, err error, _ bool) error {
@@ -132,6 +134,16 @@ func StartCmd() cli.Command {
 				Usage: "Number of retries of failed volume deletion. 0 means retry indefinitely.",
 				Value: DefaultDeletionRetryCount,
 			},
+			cli.IntFlag{
+				Name:  FlagKubeClientBurst,
+				Usage: "Burst value for kubernetes client.",
+				Value: rest.DefaultBurst,
+			},
+			cli.Float64Flag{
+				Name:  FlagKubeClientQPS,
+				Usage: "QPS value for kubernetes client.",
+				Value: float64(rest.DefaultQPS),
+			},
 		},
 		Action: func(c *cli.Context) {
 			if err := startDaemon(c); err != nil {
@@ -191,6 +203,8 @@ func startDaemon(c *cli.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "unable to get client config")
 	}
+	config.Burst = c.Int(FlagKubeClientBurst)
+	config.QPS = float32(c.Float64(FlagKubeClientQPS))
 
 	kubeClient, err := clientset.NewForConfig(config)
 	if err != nil {
@@ -262,7 +276,7 @@ func startDaemon(c *cli.Context) error {
 		return err
 	}
 	pc := pvController.NewProvisionController(
-		klog.FromContext(ctx),
+		ctx,
 		kubeClient,
 		provisionerName,
 		provisioner,

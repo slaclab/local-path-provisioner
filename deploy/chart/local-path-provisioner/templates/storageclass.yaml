@@ -16,14 +16,21 @@ metadata:
   annotations:
     storageclass.kubernetes.io/is-default-class: "{{ $values.storageClass.defaultClass }}"
     defaultVolumeType: "{{ $values.storageClass.defaultVolumeType }}"
+    {{- with $values.storageClass.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 provisioner: {{ template "local-path-provisioner.provisionerName" $dot }}
 volumeBindingMode: {{ $values.storageClass.volumeBindingMode }}
 reclaimPolicy: {{ $values.storageClass.reclaimPolicy }}
 allowVolumeExpansion: true
+{{- if $values.storageClass.allowedTopologies }}
+allowedTopologies:
+{{ toYaml $values.storageClass.allowedTopologies | indent 0 }}
+{{- end }}
 {{- if $values.storageClass.pathPattern }}
 parameters:
   pathPattern: {{ $values.storageClass.pathPattern | quote }}
-{{  end -}}
+{{- end }}
 {{- end }}
 ---
 {{- end }}

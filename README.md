@@ -1,5 +1,5 @@
 # Local Path Provisioner
-[![Build Status](https://drone-publish.rancher.io/api/badges/rancher/local-path-provisioner/status.svg)](https://drone-publish.rancher.io/rancher/local-path-provisioner)[![Go Report Card](https://goreportcard.com/badge/github.com/rancher/local-path-provisioner)](https://goreportcard.com/report/github.com/rancher/local-path-provisioner)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rancher/local-path-provisioner)](https://goreportcard.com/report/github.com/rancher/local-path-provisioner)
 
 ## Overview
 
@@ -27,7 +27,7 @@ In this setup, the directory `/opt/local-path-provisioner` will be used across a
 
 - Stable
 ```
-kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.35/deploy/local-path-storage.yaml
 ```
 
 - Development
@@ -38,7 +38,7 @@ kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisione
 Or, use `kustomize` to deploy.
 - Stable
 ```
-kustomize build "github.com/rancher/local-path-provisioner/deploy?ref=v0.0.31" | kubectl apply -f -
+kustomize build "github.com/rancher/local-path-provisioner/deploy?ref=v0.0.35" | kubectl apply -f -
 ```
 
 - Development
@@ -200,7 +200,7 @@ In this case all access modes are supported: `ReadWriteOnce`, `ReadOnlyMany` and
 
 In addition `volumeBindingMode: Immediate` can be used in  StorageClass definition.
 
-Please note that `nodePathMap`, `sharedFileSystemPath`, and `storageClassConfigs` are mutually exclusive. If `sharedFileSystemPath` or `stroageClassConfigs` are used, then `nodePathMap` must be set to `[]`.
+Please note that `nodePathMap`, `sharedFileSystemPath`, and `storageClassConfigs` are mutually exclusive. If `sharedFileSystemPath` or `storageClassConfigs` are used, then `nodePathMap` must be set to `[]`.
 
 The `setupCommand` and `teardownCommand` allow you to specify the path to binary files in helperPod that will be called when creating or deleting pvc respectively. This can be useful if you need to use distroless images for security reasons. See the examples/distroless directory for an example. A binary file can take the following parameters:
 | Parameter | Description |
@@ -278,6 +278,10 @@ A few things to note; the annotation for the `StorageClass` will apply to all vo
 If more than one `paths` are specified in the `nodePathMap` the path is chosen randomly. To make the provisioner choose a specific path, use a `storageClass` defined with a parameter called `nodePath`. Note that this path should be defined in the `nodePathMap`.
 
 By default the volume subdirectory is named using the template `{{ .PVName }}_{{ .PVC.Namespace }}_{{ .PVC.Name }}` which make the directory specific to the PV instance. The template can be changed using the `pathPattern` parameter which is interpreted as a go template. The template has access to the PV name using the `PVName` variable and the PVC metadata object, including labels and annotations, with the `PVC` variable.
+
+When `pathPattern` is set, the rendered path must start with `{{ .PVC.Namespace }}/{{ .PVC.Name }}/` and must not contain directory traversal (for example `../`).
+
+If you need to keep an existing `pathPattern` that does not follow the prefix requirement, you can opt out by setting `allowUnsafePathPattern: "true"` on the StorageClass (either in `parameters` or `metadata.annotations`). When enabled, the provisioner will skip these validations.
 ```
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -286,12 +290,36 @@ metadata:
 provisioner: rancher.io/local-path
 parameters:
   nodePath: /data/ssd
-  pathPattern: "{{ .PVC.Namespace }}/{{ .PVC.Name }}"
+  pathPattern: "{{ .PVC.Namespace }}/{{ .PVC.Name }}/"
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Delete
 ```
 
 Here the provisioner will use the path `/data/ssd` with a subdirectory per namespace and PVC when storage class `ssd-local-path` is used.
+
+### Node Affinity Key
+
+By default, PersistentVolumes created by the provisioner use the `kubernetes.io/hostname` label for node affinity. This ensures the volume is only accessible on the node where it was provisioned.
+
+In environments where node hostnames are not stable (e.g., VMs managed by orchestrators that assign new hostnames on recreation), the PV node affinity can reference a stale hostname, making the volume unschedulable. The `nodeAffinityKey` StorageClass parameter allows you to specify a different node label key that remains stable across node restarts or recreation.
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-stable
+provisioner: rancher.io/local-path
+parameters:
+  nodeAffinityKey: my.domain/stable-node-id
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+```
+
+When using this parameter, make sure every node in the cluster has the specified label set. The provisioner reads the label value from the selected node at provisioning time and writes it into the PV's `nodeAffinity` field.
+
+If the parameter is not specified, the default `kubernetes.io/hostname` behavior is preserved.
+
+**Upgrade note:** Existing PVs created before adding `nodeAffinityKey` retain their original `kubernetes.io/hostname` affinity. The provisioner handles deletion of both old and new PVs transparently. Only newly provisioned PVs will use the custom key.
 
 ## Uninstall
 
@@ -301,7 +329,7 @@ To uninstall, execute:
 
 - Stable
 ```
-kubectl delete -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.31/deploy/local-path-storage.yaml
+kubectl delete -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.35/deploy/local-path-storage.yaml
 ```
 
 - Development

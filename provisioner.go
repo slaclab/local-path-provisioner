@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,15 +16,14 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	k8serror "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 
-	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v10/controller"
+	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v11/controller"
 )
 
 type ActionType string
@@ -34,7 +34,7 @@ const (
 )
 
 const (
-	KeyNode = "kubernetes.io/hostname"
+	DefaultNodeAffinityKey = "kubernetes.io/hostname"
 
 	NodeDefaultNonListedNodes = "DEFAULT_PATH_FOR_NON_LISTED_NODES"
 
@@ -251,11 +251,14 @@ func (p *LocalPathProvisioner) getPathOnNode(node string, requestedPath string, 
 		return requestedPath, nil
 	}
 	// if no particular path was requested, choose a random one
-	path := ""
-	for path = range paths {
-		break
+	i := rand.IntN(len(paths))
+	for p := range paths {
+		if i == 0 {
+			return p, nil
+		}
+		i--
 	}
-	return path, nil
+	return "", fmt.Errorf("failed to select a random path: no path selected from %d candidates", len(paths))
 }
 
 func (p *LocalPathProvisioner) isSharedFilesystem(c *StorageClassConfig) (bool, error) {
@@ -297,7 +300,7 @@ type pvMetadata struct {
 	PVC    metav1.ObjectMeta
 }
 
-func pathFromPattern(pattern string, opts pvController.ProvisionOptions) (string, error) {
+func pathFromPattern(pattern string, opts pvController.ProvisionOptions, allowUnsafePath bool) (string, error) {
 	metadata := pvMetadata{
 		PVName: opts.PVName,
 		PVC:    opts.PVC.ObjectMeta,
@@ -314,7 +317,17 @@ func pathFromPattern(pattern string, opts pvController.ProvisionOptions) (string
 		return "", err
 	}
 
-	return buf.String(), nil
+	if allowUnsafePath {
+		return buf.String(), nil
+	}
+
+	path := buf.String()
+	fixedBasePathPrefix := filepath.Join(opts.PVC.Namespace, opts.PVC.Name) + string(filepath.Separator)
+	if !strings.HasPrefix(path, fixedBasePathPrefix) {
+		return "", fmt.Errorf("pathPattern must start with {{ .PVC.Namespace }}/{{ .PVC.Name }}/: %s", path)
+	}
+
+	return path, nil
 }
 
 func (p *LocalPathProvisioner) Provision(_ context.Context, opts pvController.ProvisionOptions) (*v1.PersistentVolume, pvController.ProvisioningState, error) {
@@ -368,10 +381,33 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 
 	pathPattern, exists := opts.StorageClass.Parameters["pathPattern"]
 	if exists {
-		folderName, err = pathFromPattern(pathPattern, opts)
+		allowUnsafePath := false
+		allowUnsafePathPattern, exists := opts.StorageClass.Parameters["allowUnsafePathPattern"]
+		if exists {
+			allowUnsafePath, err = strconv.ParseBool(allowUnsafePathPattern)
+			if err != nil {
+				logrus.Warnf("failed to parse allowUnsafePathPattern %v, defaulting to false: %v", allowUnsafePathPattern, err)
+				allowUnsafePath = false
+			}
+		} else {
+			// Read from storageclass annotation for backward compatibility
+			allowUnsafePathAnnotation, exists := opts.StorageClass.GetAnnotations()["allowUnsafePathPattern"]
+			if exists {
+				allowUnsafePath, err = strconv.ParseBool(allowUnsafePathAnnotation)
+				if err != nil {
+					logrus.Warnf("failed to parse allow-unsafe-path-pattern annotation %v, defaulting to false: %v", allowUnsafePathAnnotation, err)
+					allowUnsafePath = false
+				}
+			}
+		}
+		folderName, err = pathFromPattern(pathPattern, opts, allowUnsafePath)
 		if err != nil {
 			err = errors.Wrapf(err, "failed to create path from pattern %v", pathPattern)
 			return nil, pvController.ProvisioningFinished, err
+		}
+		// Check for directory traversal attempts in the path.
+		if !allowUnsafePath && !filepath.IsLocal(folderName) {
+			return nil, pvController.ProvisioningFinished, fmt.Errorf("folder path contains invalid references: %s", folderName)
 		}
 	}
 
@@ -422,7 +458,13 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 		// affinity, as path is accessible from any node
 		nodeAffinity = nil
 	} else {
-		valueNode, ok := node.GetLabels()[KeyNode]
+		affinityKey := DefaultNodeAffinityKey
+		if storageClass.Parameters != nil {
+			if key, ok := storageClass.Parameters["nodeAffinityKey"]; ok && key != "" {
+				affinityKey = key
+			}
+		}
+		valueNode, ok := node.GetLabels()[affinityKey]
 		if !ok {
 			valueNode = nodeName
 		}
@@ -432,7 +474,7 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 					{
 						MatchExpressions: []v1.NodeSelectorRequirement{
 							{
-								Key:      KeyNode,
+								Key:      affinityKey,
 								Operator: v1.NodeSelectorOpIn,
 								Values: []string{
 									valueNode,
@@ -483,6 +525,11 @@ func (p *LocalPathProvisioner) deleteFor(pv *v1.PersistentVolume, c *StorageClas
 		if node == "" {
 			logrus.Infof("Deleting volume %v at %v", pv.Name, path)
 		} else {
+			// Check if node still exists
+			if _, err := p.kubeClient.CoreV1().Nodes().Get(context.TODO(), node, metav1.GetOptions{}); err != nil && k8serror.IsNotFound(err) {
+				logrus.Infof("Node %v does not exist, skipping cleanup of volume %v", node, pv.Name)
+				return nil
+			}
 			logrus.Infof("Deleting volume %v at %v:%v", pv.Name, node, path)
 		}
 		storage := pv.Spec.Capacity[v1.ResourceName(v1.ResourceStorage)]
@@ -546,7 +593,7 @@ func (p *LocalPathProvisioner) getPathAndNodeForPV(pv *v1.PersistentVolume, cfg 
 	node = ""
 	for _, selectorTerm := range required.NodeSelectorTerms {
 		for _, expression := range selectorTerm.MatchExpressions {
-			if expression.Key == KeyNode && expression.Operator == v1.NodeSelectorOpIn {
+			if expression.Operator == v1.NodeSelectorOpIn {
 				if len(expression.Values) != 1 {
 					return "", "", fmt.Errorf("multiple values for the node affinity")
 				}
@@ -602,7 +649,9 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 	}
 	lpvTolerations := []v1.Toleration{
 		{
+			Key:      v1.TaintNodeDiskPressure,
 			Operator: v1.TolerationOpExists,
+			Effect:   v1.TaintEffectNoSchedule,
 		},
 	}
 	helperPod := p.helperPod.DeepCopy()
@@ -661,12 +710,14 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 		helperPod.Name = helperPod.Name[:HelperPodNameMaxLength]
 	}
 	helperPod.Namespace = p.namespace
-	if o.Node != "" {
+	if helperPod.Spec.NodeName == "" && o.Node != "" {
 		helperPod.Spec.NodeName = o.Node
 	}
 	helperPod.Spec.ServiceAccountName = p.serviceAccountName
 	helperPod.Spec.RestartPolicy = v1.RestartPolicyNever
-	helperPod.Spec.Tolerations = append(helperPod.Spec.Tolerations, lpvTolerations...)
+	if helperPod.Spec.Tolerations == nil {
+		helperPod.Spec.Tolerations = append(helperPod.Spec.Tolerations, lpvTolerations...)
+	}
 	helperPod.Spec.Volumes = append(helperPod.Spec.Volumes, lpvVolumes...)
 	helperPod.Spec.Containers[0].Command = cmd
 	helperPod.Spec.Containers[0].Env = append(helperPod.Spec.Containers[0].Env, env...)
@@ -685,7 +736,7 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 
 	defer func() {
 		// log helper pod logs to the controller
-		if err := saveHelperPodLogs(pod); err != nil {
+		if err := p.saveHelperPodLogs(pod); err != nil {
 			logrus.Error(err.Error())
 		}
 		e := p.kubeClient.CoreV1().Pods(p.namespace).Delete(context.TODO(), helperPod.Name, metav1.DeleteOptions{})
@@ -754,7 +805,9 @@ func loadConfigFile(configFile string) (cfgData *ConfigData, err error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	var data ConfigData
 	if err := json.NewDecoder(f).Decode(&data); err != nil {
@@ -855,7 +908,7 @@ func createPersistentVolumeSource(volumeType string, path string) (pvs v1.Persis
 // saveHelperPodLogs takes what is in stdout/stderr from the helper
 // pod and logs it to the provisioner's logs. Returns an error if we
 // can't retrieve the helper pod logs.
-func saveHelperPodLogs(pod *v1.Pod) (err error) {
+func (p *LocalPathProvisioner) saveHelperPodLogs(pod *v1.Pod) (err error) {
 	defer func() {
 		err = errors.Wrapf(err, "failed to save %s logs", pod.Name)
 	}()
@@ -864,16 +917,7 @@ func saveHelperPodLogs(pod *v1.Pod) (err error) {
 	podLogOpts := v1.PodLogOptions{
 		Container: "helper-pod",
 	}
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return fmt.Errorf("unable to retrieve in cluster config: %s", err.Error())
-	}
-	// creates the clientset
-	clientset, err := clientset.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("unable to get access to k8s: %s", err.Error())
-	}
-	req := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
+	req := p.kubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
 	podLogs, err := req.Stream(context.TODO())
 	if err != nil {
 		return fmt.Errorf("error in opening stream: %s", err.Error())
@@ -884,7 +928,7 @@ func saveHelperPodLogs(pod *v1.Pod) (err error) {
 	if err != nil {
 		return fmt.Errorf("error in copying information from podLogs to buf: %s", err.Error())
 	}
-	podLogs.Close()
+	_ = podLogs.Close()
 
 	// log all messages from the helper pod to the controller
 	logrus.Infof("Start of %s logs", pod.Name)
