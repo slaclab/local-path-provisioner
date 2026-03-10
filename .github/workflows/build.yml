@@ -151,10 +151,3 @@ jobs:
 #        file: package/Dockerfile
 #
 ##########################################################
-=======
-        context: ./
-        push: true
-        platforms: linux/amd64,linux/arm64,linux/arm,linux/ppc64le,linux/riscv64,linux/s390x
-        tags: rancher/local-path-provisioner:${{ github.ref_name }}
-        file: package/Dockerfile
->>>>>>> rancher_master
