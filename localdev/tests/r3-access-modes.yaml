@@ -1,0 +1,113 @@
+# ============================================================================
+# R3 — Shared-filesystem access modes: RWX, RWO, ROX   (PR #183)
+# ============================================================================
+# JIRA: PR #183 "...all access modes are supported: ReadWriteOnce, ReadOnlyMany
+#        and ReadWriteMany for storage claims."
+#
+# Shared-FS mode lifts the nodePathMap restriction that otherwise rejects
+# anything but RWO/RWOPod (provisioner.go:354). Apply and confirm every PVC
+# below reaches Bound:
+#   kubectl get pvc -l req=r3
+#
+# RWX: two pods mount the same volume and both write.
+# RWO: single-writer claim.
+# RWOPod: hard single-pod guarantee (a 2nd mounter is rejected by the API).
+# ROX: read-only; the subdir is created empty, real data is normally pre-staged.
+# ----------------------------------------------------------------------------
+# --- RWX: many writers --------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: r3-rwx
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-data-shared
+  resources: { requests: { storage: 500Mi } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r3-rwx-writer-1
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  containers:
+    - name: w1
+      image: busybox
+      command: ["sh", "-c", "echo pod-1 >> /data/shared.txt && sleep 3600"]
+      volumeMounts: [{ mountPath: /data, name: vol }]
+  volumes:
+    - { name: vol, persistentVolumeClaim: { claimName: r3-rwx } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r3-rwx-writer-2
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  containers:
+    - name: w2
+      image: busybox
+      command: ["sh", "-c", "echo pod-2 >> /data/shared.txt && sleep 3600"]
+      volumeMounts: [{ mountPath: /data, name: vol }]
+  volumes:
+    - { name: vol, persistentVolumeClaim: { claimName: r3-rwx } }
+
+---
+# --- RWO: single writer -------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: r3-rwo
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: sdf-data-scratch     # scratch = Delete on release
+  resources: { requests: { storage: 500Mi } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r3-rwo-app
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo rwo > /data/file && cat /data/file && sleep 3600"]
+      volumeMounts: [{ mountPath: /data, name: vol }]
+  volumes:
+    - { name: vol, persistentVolumeClaim: { claimName: r3-rwo } }
+
+---
+# --- ROX: read-only many ------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: r3-rox
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: sdf-data-shared
+  resources: { requests: { storage: 500Mi } }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r3-rox-reader
+  namespace: default
+  labels: { app: localdev-review, req: r3 }
+spec:
+  containers:
+    - name: reader
+      image: busybox
+      command: ["sh", "-c", "ls -la /data && sleep 3600"]
+      volumeMounts: [{ mountPath: /data, name: vol, readOnly: true }]
+  volumes:
+    - { name: vol, persistentVolumeClaim: { claimName: r3-rox } }

@@ -1,0 +1,55 @@
+# ============================================================================
+# R2 — Per-PVC subdir under the shared root   +   R4 — Retain (never delete)
+# ============================================================================
+# JIRA: "...sharing /sdf/data/X will create a directory at /sdf/data/X/<pvc> and
+#        share that rather than the top level X directory which is what we want."
+# JIRA: "...update all PVs reclaimPolicy to be Retain (not Delete)..."
+#
+# WHAT TO OBSERVE
+#   1. Apply, wait for Bound, then look on the node:
+#        colima ssh -- sudo ls -la /opt/sdf-data
+#      -> a per-PVC subdir like  pvc-<uuid>_default_r2-retain/  exists.
+#         The shared ROOT (/opt/sdf-data) is untouched. (R2 satisfied.)
+#
+#   2. Confirm the reclaim policy:
+#        kubectl get pv -o custom-columns=\
+#        'PV:.metadata.name,SC:.spec.storageClassName,RECLAIM:.spec.persistentVolumeReclaimPolicy'
+#      -> RECLAIM = Retain for the sdf-data-shared volume.
+#
+#   3. Delete the claim and prove the data SURVIVES (R4):
+#        kubectl delete -f r2-subdir-retain.yaml
+#        colima ssh -- sudo cat /opt/sdf-data/*_default_r2-retain/proof
+#      -> file still present; PV goes to phase `Released` (not deleted).
+#         (With sdf-data-scratch / Delete the subdir would be rm -rf'd instead.)
+# ----------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: r2-retain
+  namespace: default
+  labels: { app: localdev-review, req: r2 }
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-data-shared      # Retain
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r2-writer
+  namespace: default
+  labels: { app: localdev-review, req: r2 }
+spec:
+  containers:
+    - name: writer
+      image: busybox
+      command: ["sh", "-c", "echo PRESERVE-$(date +%s) > /data/proof && cat /data/proof && sleep 3600"]
+      volumeMounts:
+        - { mountPath: /data, name: vol }
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: r2-retain

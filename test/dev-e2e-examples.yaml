@@ -1,0 +1,298 @@
+###############################################################################
+# Example PVC + Pod manifests for manual testing against upstream provisioner
+#
+# These serve as reference for developers doing manual validation.
+# The automated tests generate similar manifests on-the-fly.
+#
+# Usage:
+#   kubectl apply -f dev-e2e-examples.yaml
+#   kubectl get pvc,pv,pods
+#   # ... test ...
+#   kubectl delete -f dev-e2e-examples.yaml
+###############################################################################
+
+---
+# Example 1: Data preservation test
+# Purpose: Write data, delete PVC, verify data persists on /sdf/data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-preserve
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-shared-upstream   # uses reclaimPolicy: Retain
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-preserve-writer
+  namespace: default
+spec:
+  containers:
+    - name: writer
+      image: busybox
+      command: ["sh", "-c", "echo PRESERVE-$(date +%s) > /data/proof && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-preserve
+
+---
+# Example 2: Pod steering test
+# Purpose: Verify pod lands on nodes with sdf.slac/data-mounted=true label
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-steering
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-shared-upstream
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-steering-pod
+  namespace: default
+spec:
+  # Optional: add nodeSelector to override provisioner affinity
+  # nodeSelector:
+  #   sdf.slac/data-mounted: "true"
+  containers:
+    - name: worker
+      image: busybox
+      command: ["sh", "-c", "echo Running on $(hostname) at $(date) && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-steering
+
+---
+# Example 3: RWX (ReadWriteMany) access mode
+# Purpose: Multiple pods write to the same volume simultaneously
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-rwx
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-shared-upstream
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-rwx-pod-1
+  namespace: default
+spec:
+  containers:
+    - name: writer-1
+      image: busybox
+      command: ["sh", "-c", "echo POD-1 >> /data/shared.txt && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-rwx
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-rwx-pod-2
+  namespace: default
+spec:
+  containers:
+    - name: writer-2
+      image: busybox
+      command: ["sh", "-c", "echo POD-2 >> /data/shared.txt && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-rwx
+
+---
+# Example 4: RWO (ReadWriteOnce) access mode
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-rwo
+  namespace: default
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: sdf-shared-upstream
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-rwo-pod
+  namespace: default
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo RWO-data > /data/file.txt && cat /data/file.txt && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-rwo
+
+---
+# Example 5: ROX (ReadOnlyMany) access mode
+# Note: Data must exist on /sdf/data first; the provisioner creates the subdir,
+# but the data is typically pre-populated.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-rox
+  namespace: default
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: sdf-shared-upstream
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-rox-pod-1
+  namespace: default
+spec:
+  containers:
+    - name: reader-1
+      image: busybox
+      command: ["sh", "-c", "ls -la /data && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+          readOnly: true
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-rox
+
+---
+# Example 6: Fork vs Upstream coexistence
+# Fork provisioner still running in local-path-storage ns
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-fork
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-shared           # fork provisioner's class
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-fork-pod
+  namespace: default
+spec:
+  containers:
+    - name: legacy
+      image: busybox
+      command: ["sh", "-c", "echo This uses the FORK provisioner && sleep 3600"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-fork
+
+---
+# Example 7: Stress test (create many quickly)
+# Repeat this template 10x with different names:
+# example-stress-1, example-stress-2, ..., example-stress-10
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: example-stress-1
+  namespace: default
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-shared-upstream
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-stress-1-pod
+  namespace: default
+spec:
+  containers:
+    - name: worker
+      image: busybox
+      command: ["sh", "-c", "echo Stress test $HOSTNAME && sleep 60"]
+      volumeMounts:
+        - mountPath: /data
+          name: vol
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: example-stress-1
+
+---
+# Useful debugging commands:
+# 
+# List all PVCs and their status:
+#   kubectl get pvc -o wide
+#   kubectl get pvc -o json | jq '.items[] | {name: .metadata.name, pv: .spec.volumeName, sc: .spec.storageClassName, phase: .status.phase}'
+#
+# List all PVs and their reclaim policy:
+#   kubectl get pv -o custom-columns=NAME:.metadata.name,SC:.spec.storageClassName,RECLAIM:.spec.persistentVolumeReclaimPolicy,PHASE:.status.phase
+#
+# Check which provisioner claimed a PVC:
+#   kubectl get pv <pv-name> -o jsonpath='{.spec.storageClassName}{"\n"}'
+#
+# Watch PVC binding:
+#   kubectl get pvc -w
+#
+# Inspect a PV's configuration:
+#   kubectl describe pv <pv-name>
+#   kubectl get pv <pv-name> -o yaml
+#
+# Check /sdf/data from inside the node:
+#   kubectl debug node/<node-name> -it --image=busybox
+#   # inside the debug container:
+#   ls -la /host/sdf/data
+#
+# Check provisioner logs:
+#   kubectl -n local-path-upstream logs -l app=local-path-provisioner --tail=100
+#   kubectl -n local-path-upstream logs -l app=local-path-provisioner -f
+#
+# Delete all example test PVCs:
+#   kubectl delete pvc -l app=example --all

@@ -1,3 +1,13 @@
+# ----------------------------------------------------------------------------
+# local-path-provisioner — local review deployment (SCSAUS-127)
+#
+# This deploys STOCK UPSTREAM lpp (the migration target) in shared-filesystem
+# mode against a single shared directory (/opt/sdf-data), which stands in for
+# the S3DF GPFS/Lustre mount that is present on every node at the same path.
+#
+# To review the slaclab FORK instead, swap the image below for a locally-built
+# fork image (see localdev/README.md "Build the fork image").
+# ----------------------------------------------------------------------------
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -88,7 +98,10 @@ spec:
       serviceAccountName: local-path-provisioner-service-account
       containers:
         - name: local-path-provisioner
-          image: docker.io/rancher/local-path-provisioner:v0.0.36
+          # Migration target: stock upstream release.
+          # Fork review: replace with your locally-built image, e.g.
+          #   rancher/local-path-provisioner:<git-sha>-arm64  (imported into k3s)
+          image: rancher/local-path-provisioner:v0.0.35
           imagePullPolicy: IfNotPresent
           command:
             - local-path-provisioner
@@ -112,34 +125,24 @@ spec:
             name: local-path-config
 
 ---
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-path
-provisioner: rancher.io/local-path
-volumeBindingMode: WaitForFirstConsumer
-reclaimPolicy: Delete
-
----
 kind: ConfigMap
 apiVersion: v1
 metadata:
   name: local-path-config
   namespace: local-path-storage
 data:
+  # Shared-filesystem mode (PR #183): one path mounted identically on every node.
+  # nodePathMap MUST be [] when sharedFileSystemPath is set (mutually exclusive).
   config.json: |-
     {
-            "nodePathMap":[
-            {
-                    "node":"DEFAULT_PATH_FOR_NON_LISTED_NODES",
-                    "paths":["/opt/local-path-provisioner"]
-            }
-            ]
+      "nodePathMap": [],
+      "sharedFileSystemPath": "/opt/sdf-data"
     }
+  # lpp only ever creates/removes the per-PVC SUBDIR ($VOL_DIR), never the root.
   setup: |-
     #!/bin/sh
     set -eu
-    mkdir -m 0777 -p "$VOL_DIR"
+    mkdir -m 0775 -p "$VOL_DIR"
   teardown: |-
     #!/bin/sh
     set -eu
@@ -156,6 +159,6 @@ data:
           operator: Exists
           effect: NoSchedule
       containers:
-      - name: helper-pod
-        image: docker.io/library/busybox
-        imagePullPolicy: IfNotPresent
+        - name: helper-pod
+          image: busybox
+          imagePullPolicy: IfNotPresent

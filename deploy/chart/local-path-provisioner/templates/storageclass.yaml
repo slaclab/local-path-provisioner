@@ -27,9 +27,20 @@ allowVolumeExpansion: true
 allowedTopologies:
 {{ toYaml $values.storageClass.allowedTopologies | indent 0 }}
 {{- end }}
-{{- if $values.storageClass.pathPattern }}
+{{- if or $values.storageClass.pathPattern $values.storageClass.nodePath $values.storageClass.nodeAffinityKey (hasKey $values.storageClass "allowUnsafePathPattern") }}
 parameters:
+{{- if $values.storageClass.pathPattern }}
   pathPattern: {{ $values.storageClass.pathPattern | quote }}
+{{- end }}
+{{- if $values.storageClass.nodePath }}
+  nodePath: {{ $values.storageClass.nodePath | quote }}
+{{- end }}
+{{- if hasKey $values.storageClass "allowUnsafePathPattern" }}
+  allowUnsafePathPattern: {{ $values.storageClass.allowUnsafePathPattern | quote }}
+{{- end }}
+{{- if $values.storageClass.nodeAffinityKey }}
+  nodeAffinityKey: {{ $values.storageClass.nodeAffinityKey | quote }}
+{{- end }}
 {{- end }}
 {{- end }}
 ---

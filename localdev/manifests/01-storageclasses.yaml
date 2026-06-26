@@ -1,0 +1,38 @@
+# ----------------------------------------------------------------------------
+# Two StorageClasses over the SAME shared root (/opt/sdf-data).
+#
+# The provisioner's teardown only ever touches the per-PVC subdir, so the
+# reclaimPolicy is what actually decides whether data is removed:
+#
+#   sdf-data-shared  -> Retain  : data is NEVER deleted (R2 + R4)
+#   sdf-data-scratch -> Delete  : the subdir (only) is rm -rf'd on PVC delete
+#
+# Both carry the `nodeAffinityKey` parameter to document the intended pod-steering
+# behavior (R1). NOTE: in shared-filesystem mode upstream currently IGNORES this
+# parameter and emits an empty PV nodeAffinity (provisioner.go:459) — that gap is
+# the core engineering deliverable of SCSAUS-127. See localdev/README.md §R1.
+# ----------------------------------------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sdf-data-shared
+  annotations:
+    defaultVolumeType: "hostPath"   # shared FS has no per-node affinity -> hostPath
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain               # R4: never let an honored Delete wipe data
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  nodeAffinityKey: "sdf.slac/data-mounted"   # R1 intent (ignored in sharedFS today)
+
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sdf-data-scratch
+  annotations:
+    defaultVolumeType: "hostPath"
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete               # force-delete: removes ONLY the per-PVC subdir
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  nodeAffinityKey: "sdf.slac/data-mounted"

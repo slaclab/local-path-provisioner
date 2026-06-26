@@ -1,0 +1,78 @@
+# ============================================================================
+# R1 — Dynamic label / pod steering off "bad filesystem" nodes  (PRIMARY ASK)
+# ============================================================================
+# JIRA: "...storageClass support a dynamic label so that we can make use of nfd
+#        etc to be able to steer pods off nodes that do not have that path
+#        mounted so that the workloads do not land on nodes with bad filesystems."
+#
+# WHAT TO OBSERVE
+#   1. Apply this file, then inspect the bound PV:
+#        kubectl get pv -o custom-columns=\
+#        'PV:.metadata.name,SC:.spec.storageClassName,AFFINITY:.spec.nodeAffinity'
+#      -> In shared-FS mode the AFFINITY column is <none>. The StorageClass
+#         `nodeAffinityKey` is IGNORED (provisioner.go:459). THIS IS THE GAP.
+#
+#   2. The second pod below adds the INTERIM WORKAROUND: a workload-level
+#      nodeSelector so the consuming pod avoids unlabeled / bad-FS nodes even
+#      though the PV itself carries no affinity.
+#
+#   3. True multi-node steering needs >=2 nodes (colima k3s is single-node).
+#      Locally we can still prove the mechanism: remove the label and confirm
+#      the workaround pod goes Pending; re-add it and it schedules.
+#        kubectl label node colima sdf.slac/data-mounted-            # remove
+#        kubectl label node colima sdf.slac/data-mounted=true        # restore
+# ----------------------------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: r1-steering
+  namespace: default
+  labels: { app: localdev-review, req: r1 }
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: sdf-data-shared
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Pod A: no nodeSelector — shows that nothing keeps it off an unlabeled node today.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r1-pod-no-affinity
+  namespace: default
+  labels: { app: localdev-review, req: r1 }
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo scheduled on $(hostname) && sleep 3600"]
+      volumeMounts:
+        - { mountPath: /data, name: vol }
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: r1-steering
+
+---
+# Pod B: interim workaround — workload-level nodeSelector keyed on the same label.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: r1-pod-with-nodeselector
+  namespace: default
+  labels: { app: localdev-review, req: r1 }
+spec:
+  nodeSelector:
+    sdf.slac/data-mounted: "true"
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo steered onto labeled node $(hostname) && sleep 3600"]
+      volumeMounts:
+        - { mountPath: /data, name: vol }
+  volumes:
+    - name: vol
+      persistentVolumeClaim:
+        claimName: r1-steering

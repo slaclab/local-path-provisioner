@@ -5,12 +5,12 @@ commonLabels: {}
 namespaceOverride: ""
 
 image:
-  repository: rancher/local-path-provisioner
-  tag: v0.0.35
+  repository: docker.io/rancher/local-path-provisioner
+  tag: v0.0.36
   pullPolicy: IfNotPresent
 
 helperImage:
-  repository: busybox
+  repository: docker.io/library/busybox
   tag: latest
 
 defaultSettings:
@@ -57,6 +57,16 @@ storageClass:
 
   ## Set a path pattern, if unset the default will be used
   # pathPattern: "{{ .PVC.Namespace }}-{{ .PVC.Name }}"
+
+  ## Set an optional node path override for this StorageClass
+  # nodePath: ""
+
+  ## Allow non-default pathPattern prefixes (dangerous; use only if needed)
+  # allowUnsafePathPattern: false
+
+  ## Set an optional node affinity key parameter.
+  ## In sharedFileSystemPath mode this adds a PV node affinity with operator Exists.
+  # nodeAffinityKey: "kubernetes.io/hostname"
 
 # nodePathMap is the place user can customize where to store the data on each node.
 # 1. If one node is not listed on the nodePathMap, and Kubernetes wants to create volume on it, the paths specified in
@@ -192,6 +202,9 @@ configmap:
 
 # Number of retries of failed volume deletion. 0 means retry indefinitely.
 # deletionRetryCount: 15
+
+# Enable debug logging
+debug: false
 
 # Extra arguments to pass to the CLI
 extraArgs: []
