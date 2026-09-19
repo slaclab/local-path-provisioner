@@ -1,6 +1,12 @@
 # Local Path Provisioner
 [![Go Report Card](https://goreportcard.com/badge/github.com/rancher/local-path-provisioner)](https://goreportcard.com/report/github.com/rancher/local-path-provisioner)
 
+> **S3DF image:** this fork permanently retains backing data, brokers pre-existing
+> shared roots, and reads node affinity keys from its ConfigMap. See
+> [S3DF_IMAGE.md](S3DF_IMAGE.md) for the image contract and manual build instructions.
+> The stock Rancher images in the upstream installation examples below do not
+> implement this contract; use the reviewed S3DF image for facility storage.
+
 ## Overview
 
 Local Path Provisioner provides a way for the Kubernetes users to utilize the local storage in each node. Based on the user configuration, the Local Path Provisioner will create either `hostPath` or `local` based persistent volume on the node automatically. It utilizes the features introduced by Kubernetes [Local Persistent Volume feature](https://kubernetes.io/blog/2018/04/13/local-persistent-volumes-beta/), but makes it a simpler solution than the built-in `local` volume feature in Kubernetes.
@@ -27,7 +33,7 @@ In this setup, the directory `/opt/local-path-provisioner` will be used across a
 
 - Stable
 ```
-kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.36/deploy/local-path-storage.yaml
+kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml
 ```
 
 - Development
@@ -38,7 +44,7 @@ kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisione
 Or, use `kustomize` to deploy.
 - Stable
 ```
-kustomize build "github.com/rancher/local-path-provisioner/deploy?ref=v0.0.36" | kubectl apply -f -
+kustomize build "github.com/rancher/local-path-provisioner/deploy?ref=v0.0.37" | kubectl apply -f -
 ```
 
 - Development
@@ -124,7 +130,8 @@ Or, use `kustomize` to delete them.
 kustomize build "github.com/rancher/local-path-provisioner/examples/pod?ref=master" | kubectl delete -f -
 ```
 
-The volume content stored on the node will be automatically cleaned up. You can check the log of `local-path-provisioner-xxx` for details.
+With the S3DF image, the PV API object is reclaimed when its policy is `Delete`,
+but the volume's contents are never cleaned up. Retention is logged for each PV.
 
 Now you've verified that the provisioner works as expected.
 
@@ -164,7 +171,7 @@ data:
   teardown: |-
         #!/bin/sh
         set -eu
-        rm -rf "$VOL_DIR"
+        echo "S3DF retains volume data; teardown is never invoked"
   helperPod.yaml: |-
         apiVersion: v1
         kind: Pod
@@ -182,7 +189,8 @@ data:
 
 ```
 
-The helperPod is allowed to run on nodes experiencing disk pressure conditions, despite the potential resource constraints. When it runs on such a node, it can carry out specific cleanup tasks, freeing up space in PVCs, and resolving the disk-pressure issue.
+The helperPod can run setup on nodes experiencing disk pressure. The S3DF image
+never creates a cleanup helper and does not free filesystem space on PVC deletion.
 
 #### `config.json`
 
@@ -193,7 +201,9 @@ The helperPod is allowed to run on nodes experiencing disk pressure conditions, 
     1. If one node is listed but with `paths` set to `[]`, the provisioner will refuse to provision on this node.
     2. If more than one path was specified, the path would be chosen randomly when provisioning.
 
-`sharedFileSystemPath` allows the provisioner to use a filesystem that is mounted on all nodes at the same time.
+`sharedFileSystemPath` is the pre-existing facility root used verbatim by every PV
+from that configuration, without a per-PVC subdirectory. `nodeAffinityKey` in the
+same ConfigMap identifies the node label advertising mount availability.
 In this case all access modes are supported: `ReadWriteOnce`, `ReadOnlyMany` and `ReadWriteMany` for storage claims.
 
 `storageClassConfigs` is a map from storage class names to objects containing `nodePathMap` or `sharedFilesystemPath`, as described above.
@@ -202,15 +212,18 @@ In addition `volumeBindingMode: Immediate` can be used in  StorageClass definiti
 
 Please note that `nodePathMap`, `sharedFileSystemPath`, and `storageClassConfigs` are mutually exclusive. If `sharedFileSystemPath` or `storageClassConfigs` are used, then `nodePathMap` must be set to `[]`.
 
-The `setupCommand` and `teardownCommand` allow you to specify the path to binary files in helperPod that will be called when creating or deleting pvc respectively. This can be useful if you need to use distroless images for security reasons. See the examples/distroless directory for an example. A binary file can take the following parameters:
+`setupCommand` selects a setup binary instead of the setup script, for example
+with a distroless helper. `teardownCommand` is accepted for configuration
+compatibility but is never invoked. No configuration can re-enable data deletion.
+A setup binary can take the following parameters:
 | Parameter | Description |
 | -------------------- | ----------- |
-| -p | Volume directory that should be created or removed. | -m | -p | Volume directory that should be created or removed. |
-| -m | The PersistentVolume mode (`Block` or `Filesystem`). | -m | The PersistentVolume mode (`Block` or `Filesystem`). |
-| -s | Requested volume size in bytes. | -s | Requested volume size in bytes. |
-| -a | Action type. Can be `create` or `delete` | -a | -a | Action type.
+| -p | Pre-existing shared root, or node-local directory to prepare. |
+| -m | The PersistentVolume mode (`Block` or `Filesystem`). |
+| -s | Requested volume size in bytes; advisory for shared roots. |
+| -a | Always `create`; delete helpers are disabled. |
 
-The `setupCommand` and `teardownCommand` have higher priority than the `setup` and `teardown` scripts from the ConfigMap.  
+`setupCommand` has higher priority than the `setup` script from the ConfigMap.
 
 ##### Rules
 The configuration must obey following rules:
@@ -222,9 +235,11 @@ The configuration must obey following rules:
 
 #### Scripts `setup` and `teardown` and the `helperPod.yaml` template
 
-* The `setup` script is run before the volume is created, to prepare the volume directory on the node.
-* The `teardown` script is run after the volume is deleted, to cleanup the volume directory on the node.
-* The `helperPod.yaml` template is used to create a helper Pod that runs the `setup` or `teardown` script.
+* The `setup` script runs before a PV is created. Shared roots must already exist.
+* The `teardown` script is neither mounted into helpers nor executed.
+* `helperPod.yaml` supplies the setup Pod template. Shared setup mounts the root
+  read-only with `hostPath.type: Directory`, and uses the configured mount-label
+  affinity without bypassing the scheduler via `nodeName`.
 
 By default, the helper pod template is validated before it is accepted. The template may customize the helper container image and regular pod settings such as `priorityClassName` and `tolerations`, but it must not define its own `securityContext`, `volumes`, `volumeMounts`, `initContainers`, `ephemeralContainers`, `envFrom`, `env.valueFrom`, `lifecycle`, `livenessProbe`, `readinessProbe`, `startupProbe`, host namespaces, `spec.nodeName`, or `spec.serviceAccountName`.
 
@@ -234,9 +249,12 @@ The scripts receive their input as environment variables:
 
 | Environment variable | Description |
 | -------------------- | ----------- |
-| `VOL_DIR` | Volume directory that should be created or removed. |
+| `VOL_DIR` | Shared facility root verbatim, or the per-PV directory in node-local mode. |
 | `VOL_MODE` | The PersistentVolume mode (`Block` or `Filesystem`). |
 | `VOL_SIZE_BYTES` | Requested volume size in bytes. |
+| `VOL_USER` | User rendered from `userPattern`. |
+| `VOL_GROUP` | Group rendered from `groupPattern`. |
+| `VOL_PERM` | Permissions rendered from `permPattern`. |
 
 #### Reloading
 
@@ -283,9 +301,18 @@ A few things to note; the annotation for the `StorageClass` will apply to all vo
 
 If more than one `paths` are specified in the `nodePathMap` the path is chosen randomly. To make the provisioner choose a specific path, use a `storageClass` defined with a parameter called `nodePath`. Note that this path should be defined in the `nodePathMap`.
 
-By default the volume subdirectory is named using the template `{{ .PVName }}_{{ .PVC.Namespace }}_{{ .PVC.Name }}` which make the directory specific to the PV instance. The template can be changed using the `pathPattern` parameter which is interpreted as a go template. The template has access to the PV name using the `PVName` variable and the PVC metadata object, including labels and annotations, with the `PVC` variable.
+In node-local mode, the volume subdirectory is named using
+`{{ .PVName }}_{{ .PVC.Namespace }}_{{ .PVC.Name }}`. The `pathPattern` Go template
+can change this name and has access to `PVName` and the PVC metadata as `PVC`.
+Shared mode always mounts the configured facility root. It rejects `pathPattern`,
+`allowUnsafePathPattern`, `userPattern`, `groupPattern`, and `permPattern` in either
+StorageClass parameters or annotations rather than altering a facility root.
 
 When `pathPattern` is set, the rendered path must start with `{{ .PVC.Namespace }}/{{ .PVC.Name }}/` and must not contain directory traversal (for example `../`).
+
+In node-local mode, `userPattern`, `groupPattern` and `permPattern` (in `parameters`
+or `metadata.annotations`) set `$VOL_USER`, `$VOL_GROUP` and `$VOL_PERM` for the
+setup script using data from the PVC.
 
 If you need to keep an existing `pathPattern` that does not follow the prefix requirement, you can opt out by setting `allowUnsafePathPattern: "true"` on the StorageClass (either in `parameters` or `metadata.annotations`). When enabled, the provisioner will skip these validations.
 ```
@@ -305,27 +332,33 @@ Here the provisioner will use the path `/data/ssd` with a subdirectory per names
 
 ### Node Affinity Key
 
-By default, PersistentVolumes created by the provisioner use the `kubernetes.io/hostname` label for node affinity. This ensures the volume is only accessible on the node where it was provisioned.
+`nodeAffinityKey` is read only from the provisioner's `config.json`, alongside
+`sharedFileSystemPath` or `nodePathMap`:
 
-In environments where node hostnames are not stable (e.g., VMs managed by orchestrators that assign new hostnames on recreation), the PV node affinity can reference a stale hostname, making the volume unschedulable. The `nodeAffinityKey` StorageClass parameter allows you to specify a different node label key that remains stable across node restarts or recreation.
-
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-path-stable
-provisioner: rancher.io/local-path
-parameters:
-  nodeAffinityKey: my.domain/stable-node-id
-volumeBindingMode: WaitForFirstConsumer
-reclaimPolicy: Delete
+```json
+{
+  "sharedFileSystemPath": "/sdf/data/lcls",
+  "nodePathMap": [],
+  "nodeAffinityKey": "edu.stanford.slac.sdf.storage/sdf-data-lcls"
+}
 ```
 
-When using this parameter, make sure every node in the cluster has the specified label set. The provisioner reads the label value from the selected node at provisioning time and writes it into the PV's `nodeAffinity` field.
+Shared mode emits exactly one `Exists` expression with the configured key and no
+values. Setup helpers require the same key. An empty key leaves PV affinity unset
+and logs a warning. Label values are irrelevant: remove the key, rather than set
+it to `"false"`, when a mount is unhealthy.
 
-If the parameter is not specified, the default `kubernetes.io/hostname` behavior is preserved.
+Node-local mode emits `In` using the selected node's label value and defaults to
+`kubernetes.io/hostname` when the key is unset. The key can also be supplied inside
+an individual `storageClassConfigs` entry.
 
-**Upgrade note:** Existing PVs created before adding `nodeAffinityKey` retain their original `kubernetes.io/hostname` affinity. The provisioner handles deletion of both old and new PVs transparently. Only newly provisioned PVs will use the custom key.
+Neither `parameters.nodeAffinityKey` nor the old
+`local.path.provisioner/node-affinity-key` StorageClass annotation is consumed.
+The Helm value is top-level `nodeAffinityKey`, not `storageClass.nodeAffinityKey`.
+
+**Upgrade note:** ConfigMap changes hot-reload on the normal approximately
+30-second interval and affect only newly provisioned PVs. Existing PVs and running
+pods are not reconciled or evicted. Existing-PV migration is a separate operation.
 
 ## Uninstall
 
@@ -335,7 +368,7 @@ To uninstall, execute:
 
 - Stable
 ```
-kubectl delete -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.36/deploy/local-path-storage.yaml
+kubectl delete -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.37/deploy/local-path-storage.yaml
 ```
 
 - Development

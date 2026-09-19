@@ -1,3 +1,2 @@
-From centos:7
+FROM almalinux:10
 RUN yum install -y xfsprogs
-

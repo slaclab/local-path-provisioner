@@ -14,6 +14,9 @@ data:
     {{- with .Values.sharedFileSystemPath }}
     {{- $config = set $config "sharedFileSystemPath" . }}
     {{- end }}
+    {{- with .Values.nodeAffinityKey }}
+    {{- $config = set $config "nodeAffinityKey" . }}
+    {{- end }}
     {{- with .Values.storageClassConfigs }}
     {{- $configs := dict }}
     {{- range $key, $value := . }}
@@ -23,6 +26,9 @@ data:
       {{- end }}
       {{- with $value.sharedFileSystemPath }}
       {{- $configValue = set $configValue "sharedFileSystemPath" . }}
+      {{- end }}
+      {{- with $value.nodeAffinityKey }}
+      {{- $configValue = set $configValue "nodeAffinityKey" . }}
       {{- end }}
       {{- $configs = set $configs $key $configValue }}
     {{- end }}

@@ -5,6 +5,8 @@ resources:
 - storage-class.yaml
 - pod.yaml
 - pvc.yaml
+patches:
+- path: local-path-config.yaml
 images:
 - name: docker.io/rancher/local-path-provisioner
   newTag: dev

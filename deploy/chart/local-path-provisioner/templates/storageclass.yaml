@@ -6,6 +6,9 @@
 {{ end }}
 {{- $dot := . }}
 {{- range $name, $values := $storageClasses }}
+{{- if or (hasKey $values.storageClass "nodeAffinityKey") (hasKey ($values.storageClass.annotations | default dict) "local.path.provisioner/node-affinity-key") }}
+{{- fail "nodeAffinityKey belongs alongside sharedFileSystemPath in the ConfigMap values, not in storageClass" }}
+{{- end }}
 {{ if $values.storageClass.create -}}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
@@ -27,20 +30,26 @@ allowVolumeExpansion: true
 allowedTopologies:
 {{ toYaml $values.storageClass.allowedTopologies | indent 0 }}
 {{- end }}
-{{- if or $values.storageClass.pathPattern $values.storageClass.nodePath $values.storageClass.nodeAffinityKey (hasKey $values.storageClass "allowUnsafePathPattern") }}
+{{- if or $values.storageClass.pathPattern $values.storageClass.nodePath (hasKey $values.storageClass "allowUnsafePathPattern") $values.storageClass.userPattern $values.storageClass.groupPattern $values.storageClass.permPattern }}
 parameters:
-{{- if $values.storageClass.pathPattern }}
+  {{- if $values.storageClass.pathPattern }}
   pathPattern: {{ $values.storageClass.pathPattern | quote }}
-{{- end }}
-{{- if $values.storageClass.nodePath }}
+  {{- end }}
+  {{- if $values.storageClass.nodePath }}
   nodePath: {{ $values.storageClass.nodePath | quote }}
-{{- end }}
-{{- if hasKey $values.storageClass "allowUnsafePathPattern" }}
+  {{- end }}
+  {{- if hasKey $values.storageClass "allowUnsafePathPattern" }}
   allowUnsafePathPattern: {{ $values.storageClass.allowUnsafePathPattern | quote }}
-{{- end }}
-{{- if $values.storageClass.nodeAffinityKey }}
-  nodeAffinityKey: {{ $values.storageClass.nodeAffinityKey | quote }}
-{{- end }}
+  {{- end }}
+  {{- if $values.storageClass.userPattern }}
+  userPattern: {{ $values.storageClass.userPattern | quote }}
+  {{- end }}
+  {{- if $values.storageClass.groupPattern }}
+  groupPattern: {{ $values.storageClass.groupPattern | quote }}
+  {{- end }}
+  {{- if $values.storageClass.permPattern }}
+  permPattern: {{ $values.storageClass.permPattern | quote }}
+  {{- end }}
 {{- end }}
 {{- end }}
 ---

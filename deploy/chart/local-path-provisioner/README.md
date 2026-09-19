@@ -19,6 +19,40 @@ $ helm install --name local-path-storage --namespace local-path-storage ./deploy
 This chart bootstraps a [Local Path Provisioner](https://github.com/rancher/local-path-provisioner) deployment on a
 [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
 
+### S3DF image contract
+
+For facility storage, explicitly override the upstream image defaults with the
+reviewed immutable S3DF image. One instance normally serves one StorageClass and
+one pre-existing share:
+
+```yaml
+image:
+  repository: ghcr.io/slaclab/local-path-provisioner
+  tag: "<immutable-s3df-tag>"
+sharedFileSystemPath: /sdf/data/lcls
+nodePathMap: []
+nodeAffinityKey: edu.stanford.slac.sdf.storage/sdf-data-lcls
+storageClass:
+  name: sdf-data-lcls
+  reclaimPolicy: Delete
+```
+
+The key is rendered into ConfigMap `config.json`, never into the StorageClass.
+Old `storageClass.nodeAffinityKey` values and steering annotations are rejected.
+Shared PVs use the exact root and `Exists` affinity; remove the node label key
+when the mount is unhealthy. Reloads affect new PVs only.
+
+The S3DF image honors `Delete` by reclaiming the PV API object while retaining all
+backing data, unconditionally. `Retain` still leaves the API object in place.
+Setup mounts the shared root read-only with type `Directory`; teardown is never
+invoked. Shared mode rejects path, unsafe-path, user, group, and permission
+patterns. Node-local subdirectory and permission-pattern behavior is preserved.
+
+Capacity is advisory, with no per-claim quota or isolation. Every PVC from an
+instance sees the same share. RWX does not coordinate writers; POSIX permissions,
+application fencing, and write ownership remain the facility/application's
+responsibility. See [S3DF_IMAGE.md](../../../S3DF_IMAGE.md).
+
 ## Prerequisites
 
 - Kubernetes 1.12+ with Beta APIs enabled
@@ -57,7 +91,7 @@ default values.
 |-----------------------------------------|---------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `commonLabels`                          | Custom labels to apply to all resources                                         | `{}`                                                                                                                                                                                                                                                                                                                                             |
 | `image.repository`                      | Local Path Provisioner image name                                               | `docker.io/rancher/local-path-provisioner`                                                                                                                                                                                                                                                                                                                 |
-| `image.tag`                             | Local Path Provisioner image tag                                                | `v0.0.36` .                                                                                                                                                                                                                                                                                                                                      |
+| `image.tag`                             | Local Path Provisioner image tag                                                | `v0.0.37` .                                                                                                                                                                                                                                                                                                                                      |
 | `image.pullPolicy`                      | Image pull policy                                                               | `IfNotPresent`                                                                                                                                                                                                                                                                                                                                   |
 | `storageClass.annotations`              | Extra annotations to add to the StorageClass                                    | `{}`                                                                                                                                                                                                                                                                                                                                             |
 | `storageClass.create`                   | If true, create a `StorageClass`                                                | `true`                                                                                                                                                                                                                                                                                                                                           |
@@ -71,7 +105,8 @@ default values.
 | `storageClass.pathPattern`              | Template for the volume directory name                                          | `nil`                                                                                                                                                                                                                                                                                                                                            |
 | `storageClass.nodePath`                 | Optional fixed node path request passed as StorageClass parameter               | `nil`                                                                                                                                                                                                                                                                                                                                            |
 | `storageClass.allowUnsafePathPattern`   | Allow non-default pathPattern prefixes (advanced/unsafe)                       | `nil`                                                                                                                                                                                                                                                                                                                                            |
-| `storageClass.nodeAffinityKey`          | Optional node-affinity key passed as StorageClass parameter                     | `nil`                                                                                                                                                                                                                                                                                                                                            |
+| `nodeAffinityKey`                       | ConfigMap-only node label key; shared volumes use `Exists`, node-local volumes use `In` | `""` |
+| `sharedFileSystemPath`                  | Pre-existing facility root mounted by every PV from this instance, without subdirectories | unset |
 | `nodePathMap`                           | Configuration of where to store the data on each node                           | `[{node: DEFAULT_PATH_FOR_NON_LISTED_NODES, paths: [/opt/local-path-provisioner]}]`                                                                                                                                                                                                                                                              |
 | `resources`                             | Local Path Provisioner resource requests & limits                               | `{}`                                                                                                                                                                                                                                                                                                                                             |
 | `rbac.create`                           | If true, create & use RBAC resources                                            | `true`                                                                                                                                                                                                                                                                                                                                           |
@@ -84,7 +119,7 @@ default values.
 | `priorityClassName`                     | Priority class name for the main provisioner pod                                | `""`                                                                                                                                                                                                                                                                                                                                             |
 | `configmap.helperPod.priorityClassName` | Priority class name for the helper pod                                          | `"system-node-critical"`                                                                                                                                                                                                                                                                                                                         |
 | `configmap.setup`                       | Configuration of script to execute setup operations on each node                | #!/bin/sh<br>while getopts "m:s:p:" opt<br>do<br>&emsp;case $opt in <br>&emsp;&emsp;p)<br>&emsp;&emsp;absolutePath=$OPTARG<br>&emsp;&emsp;;;<br>&emsp;&emsp;s)<br>&emsp;&emsp;sizeInBytes=$OPTARG<br>&emsp;&emsp;;;<br>&emsp;&emsp;m)<br>&emsp;&emsp;volMode=$OPTARG<br>&emsp;&emsp;;;<br>&emsp;esac<br>done<br>mkdir -m 0777 -p ${absolutePath} |
-| `configmap.teardown`                    | Configuration of script to execute teardown operations on each node             | #!/bin/sh<br>while getopts "m:s:p:" opt<br>do<br>&emsp;case $opt in <br>&emsp;&emsp;p)<br>&emsp;&emsp;absolutePath=$OPTARG<br>&emsp;&emsp;;;<br>&emsp;&emsp;s)<br>&emsp;&emsp;sizeInBytes=$OPTARG<br>&emsp;&emsp;;;<br>&emsp;&emsp;m)<br>&emsp;&emsp;volMode=$OPTARG<br>&emsp;&emsp;;;<br>&emsp;esac<br>done<br>rm -rf ${absolutePath}           |
+| `configmap.teardown`                    | Compatibility-only script; the S3DF binary never invokes it | Retention message only |
 | `configmap.name`                        | configmap name                                                                  | `local-path-config`                                                                                                                                                                                                                                                                                                                              |
 | `configmap.helperPod`                   | helper pod yaml file                                                            | apiVersion: v1<br>kind: Pod<br>metadata:<br>&emsp;name: helper-pod<br>spec:<br>&emsp;containers:<br>&emsp;- name: helper-pod<br>&emsp;&emsp;image: docker.io/library/busybox                                                                                                                                                                                       |
 

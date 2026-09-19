@@ -6,7 +6,7 @@ namespaceOverride: ""
 
 image:
   repository: docker.io/rancher/local-path-provisioner
-  tag: v0.0.36
+  tag: v0.0.37
   pullPolicy: IfNotPresent
 
 helperImage:
@@ -55,7 +55,7 @@ storageClass:
   ## annotations to add to the StorageClass
   annotations: {}
 
-  ## Set a path pattern, if unset the default will be used
+  ## Node-local only: set a path pattern, otherwise use the per-PV default.
   # pathPattern: "{{ .PVC.Namespace }}-{{ .PVC.Name }}"
 
   ## Set an optional node path override for this StorageClass
@@ -64,9 +64,14 @@ storageClass:
   ## Allow non-default pathPattern prefixes (dangerous; use only if needed)
   # allowUnsafePathPattern: false
 
-  ## Set an optional node affinity key parameter.
-  ## In sharedFileSystemPath mode this adds a PV node affinity with operator Exists.
-  # nodeAffinityKey: "kubernetes.io/hostname"
+  ## Node-local only: set a user pattern.
+  userPattern: ''
+
+  ## Node-local only: set a group pattern.
+  groupPattern: ''
+
+  ## Node-local only: set a permission pattern. Quote numeric modes (e.g. '0700').
+  permPattern: ''
 
 # nodePathMap is the place user can customize where to store the data on each node.
 # 1. If one node is not listed on the nodePathMap, and Kubernetes wants to create volume on it, the paths specified in
@@ -85,13 +90,18 @@ nodePathMap:
     paths:
       - /opt/local-path-provisioner
 
-# `sharedFileSystemPath` allows the provisioner to use a filesystem that is mounted on all
-# nodes at the same time. In this case all access modes are supported: `ReadWriteOnce`,
+# `sharedFileSystemPath` brokers the pre-existing facility root, not per-PVC subdirectories.
+# The root must already exist on eligible nodes. All access modes are supported: `ReadWriteOnce`,
 # `ReadOnlyMany` and `ReadWriteMany` for storage claims. In addition
 # `volumeBindingMode: Immediate` can be used in  StorageClass definition.
 # Please note that `nodePathMap` and `sharedFileSystemPath` are mutually exclusive.
 # If `sharedFileSystemPath` is used, then `nodePathMap` must be set to `[]`.
 # sharedFileSystemPath: ""
+
+# Read only from config.json, including on configuration reload.
+# Shared mode uses Exists; remove the label key when the mount is unhealthy.
+# Node-local mode uses In, defaulting to kubernetes.io/hostname when unset.
+nodeAffinityKey: ""
 
 # `storageClassConfigs` allows the provisioner to manage multiple independent storage classes.
 # Each storage class must have a unique name, and contains the same fields as shown above for
@@ -105,6 +115,7 @@ nodePathMap:
 #       defaultVolumeType: hostPath
 #       reclaimPolicy: Delete
 #     sharedFileSystemPath: ""
+#     nodeAffinityKey: ""
 #     ## OR
 #     # See above
 #     nodePathMap: []
@@ -185,7 +196,7 @@ configmap:
   teardown: |-
     #!/bin/sh
     set -eu
-    rm -rf "$VOL_DIR"
+    echo "S3DF retains volume data; teardown is never invoked"
   helperPod:
     # Allows to run the helper pod in another namespace. Uses release namespace by default.
     namespaceOverride: ""
@@ -208,3 +219,30 @@ debug: false
 
 # Extra arguments to pass to the CLI
 extraArgs: []
+
+# Health check configuration
+# To disable health checks, set health.enabled to false
+health:
+  enabled: true
+  port: 8080
+  # Full probe definitions can be overridden here
+  # The following defaults will be used if not overridden:
+  startupProbe:
+    httpGet:
+      path: /health
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 12
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5

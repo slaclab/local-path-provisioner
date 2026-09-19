@@ -21,6 +21,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	k8serror "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientset "k8s.io/client-go/kubernetes"
 
 	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v11/controller"
@@ -28,10 +29,7 @@ import (
 
 type ActionType string
 
-const (
-	ActionTypeCreate = "create"
-	ActionTypeDelete = "delete"
-)
+const ActionTypeCreate = "create"
 
 const (
 	DefaultNodeAffinityKey = "kubernetes.io/hostname"
@@ -42,9 +40,12 @@ const (
 	helperDataVolName   = "data"
 	helperScriptVolName = "script"
 
-	envVolDir  = "VOL_DIR"
-	envVolMode = "VOL_MODE"
-	envVolSize = "VOL_SIZE_BYTES"
+	envVolDir   = "VOL_DIR"
+	envVolMode  = "VOL_MODE"
+	envVolSize  = "VOL_SIZE_BYTES"
+	envVolUser  = "VOL_USER"
+	envVolGroup = "VOL_GROUP"
+	envVolPerm  = "VOL_PERM"
 )
 
 const (
@@ -53,7 +54,10 @@ const (
 )
 
 const (
-	nodeNameAnnotationKey = "local.path.provisioner/selected-node"
+	nodeNameAnnotationKey     = "local.path.provisioner/selected-node"
+	userPatternAnnotationKey  = "userPattern"
+	groupPatternAnnotationKey = "groupPattern"
+	permPatternAnnotationKey  = "permPattern"
 )
 
 var (
@@ -64,7 +68,7 @@ var (
 
 type LocalPathProvisioner struct {
 	ctx                context.Context
-	kubeClient         *clientset.Clientset
+	kubeClient         clientset.Interface
 	namespace          string
 	helperImage        string
 	serviceAccountName string
@@ -86,6 +90,7 @@ type NodePathMapData struct {
 type StorageClassConfigData struct {
 	NodePathMap          []*NodePathMapData `json:"nodePathMap,omitempty"`
 	SharedFileSystemPath string             `json:"sharedFileSystemPath,omitempty"`
+	NodeAffinityKey      string             `json:"nodeAffinityKey,omitempty"`
 }
 
 type ConfigData struct {
@@ -99,6 +104,7 @@ type ConfigData struct {
 type StorageClassConfig struct {
 	NodePathMap          map[string]*NodePathMap
 	SharedFileSystemPath string
+	NodeAffinityKey      string
 }
 
 type NodePathMap struct {
@@ -113,7 +119,7 @@ type Config struct {
 	StorageClassConfigs map[string]StorageClassConfig
 }
 
-func NewProvisioner(ctx context.Context, kubeClient *clientset.Clientset,
+func NewProvisioner(ctx context.Context, kubeClient clientset.Interface,
 	configFile, namespace, helperImage, configMapName, serviceAccountName, helperPodYaml string, allowUnsafeHelperPodTemplate bool) (*LocalPathProvisioner, error) {
 	p := &LocalPathProvisioner{
 		ctx: ctx,
@@ -139,6 +145,7 @@ func NewProvisioner(ctx context.Context, kubeClient *clientset.Clientset,
 	if err := p.refreshConfig(); err != nil {
 		return nil, err
 	}
+	logrus.Info("S3DF data-preservation mode: filesystem deletion is permanently disabled; Delete reclaims PV API objects only")
 	p.watchAndRefreshConfig()
 	return p, nil
 }
@@ -187,10 +194,11 @@ func (p *LocalPathProvisioner) refreshHelperPod() error {
 		return err
 	}
 
-	p.helperPod, err = loadHelperPodFile(newHelperPod, p.allowUnsafeHelperPodTemplate)
+	helperPod, err := loadHelperPodFile(newHelperPod, p.allowUnsafeHelperPodTemplate)
 	if err != nil {
 		return err
 	}
+	p.helperPod = helperPod
 
 	return nil
 }
@@ -217,13 +225,6 @@ func (p *LocalPathProvisioner) watchAndRefreshConfig() {
 }
 
 func (p *LocalPathProvisioner) getPathOnNode(node string, requestedPath string, c *StorageClassConfig) (string, error) {
-	p.configMutex.RLock()
-	defer p.configMutex.RUnlock()
-
-	if p.config == nil {
-		return "", fmt.Errorf("no valid config available")
-	}
-
 	sharedFS, err := p.isSharedFilesystem(c)
 	if err != nil {
 		return "", err
@@ -264,10 +265,7 @@ func (p *LocalPathProvisioner) getPathOnNode(node string, requestedPath string, 
 }
 
 func (p *LocalPathProvisioner) isSharedFilesystem(c *StorageClassConfig) (bool, error) {
-	p.configMutex.RLock()
-	defer p.configMutex.RUnlock()
-
-	if p.config == nil {
+	if c == nil {
 		return false, fmt.Errorf("no valid config available")
 	}
 
@@ -287,6 +285,11 @@ func (p *LocalPathProvisioner) isSharedFilesystem(c *StorageClassConfig) (bool, 
 }
 
 func (p *LocalPathProvisioner) pickConfig(storageClassName string) (*StorageClassConfig, error) {
+	p.configMutex.RLock()
+	defer p.configMutex.RUnlock()
+	if p.config == nil {
+		return nil, fmt.Errorf("no valid config available")
+	}
 	if len(p.config.StorageClassConfigs) == 0 {
 		return &p.config.StorageClassConfig, nil
 	}
@@ -332,6 +335,26 @@ func pathFromPattern(pattern string, opts pvController.ProvisionOptions, allowUn
 	return path, nil
 }
 
+func dataFromPattern(pattern string, opts pvController.ProvisionOptions) (string, error) {
+	metadata := pvMetadata{
+		PVName: opts.PVName,
+		PVC:    opts.PVC.ObjectMeta,
+	}
+
+	tpl, err := template.New("dataPattern").Option("missingkey=error").Parse(pattern)
+	if err != nil {
+		return "", err
+	}
+
+	buf := new(bytes.Buffer)
+	err = tpl.Execute(buf, metadata)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(buf.String()), nil
+}
+
 func (p *LocalPathProvisioner) Provision(_ context.Context, opts pvController.ProvisionOptions) (*v1.PersistentVolume, pvController.ProvisioningState, error) {
 	cfg, err := p.pickConfig(opts.StorageClass.Name)
 	if err != nil {
@@ -364,7 +387,6 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 
 	nodeName := ""
 	if node != nil {
-		// This clause works only with sharedFS
 		nodeName = node.Name
 	}
 	var requestedPath string
@@ -379,41 +401,55 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 	}
 
 	name := opts.PVName
-	folderName := strings.Join([]string{name, opts.PVC.Namespace, opts.PVC.Name}, "_")
-
-	pathPattern, exists := opts.StorageClass.Parameters["pathPattern"]
-	if exists {
-		allowUnsafePath := false
-		allowUnsafePathPattern, exists := opts.StorageClass.Parameters["allowUnsafePathPattern"]
-		if exists {
-			allowUnsafePath, err = strconv.ParseBool(allowUnsafePathPattern)
-			if err != nil {
-				logrus.Warnf("failed to parse allowUnsafePathPattern %v, defaulting to false: %v", allowUnsafePathPattern, err)
-				allowUnsafePath = false
+	// Shared PVs broker the existing facility root; only node-local PVs get subdirectories.
+	path := basePath
+	if sharedFS {
+		for _, key := range []string{"pathPattern", "allowUnsafePathPattern", userPatternAnnotationKey, groupPatternAnnotationKey, permPatternAnnotationKey} {
+			_, parameterSet := storageClass.Parameters[key]
+			_, annotationSet := storageClass.Annotations[key]
+			if parameterSet || annotationSet {
+				return nil, pvController.ProvisioningFinished, fmt.Errorf("%s is not supported with sharedFileSystemPath: the facility root and its permissions must be preserved", key)
 			}
-		} else {
-			// Read from storageclass annotation for backward compatibility
-			allowUnsafePathAnnotation, exists := opts.StorageClass.GetAnnotations()["allowUnsafePathPattern"]
+		}
+		if c.NodeAffinityKey == "" {
+			logrus.Warnf("Shared filesystem volume %v at %v has no nodeAffinityKey; mount availability is not constrained", name, path)
+		}
+	} else {
+		folderName := strings.Join([]string{name, opts.PVC.Namespace, opts.PVC.Name}, "_")
+		pathPattern, exists := opts.StorageClass.Parameters["pathPattern"]
+		if exists {
+			allowUnsafePath := false
+			allowUnsafePathPattern, exists := opts.StorageClass.Parameters["allowUnsafePathPattern"]
 			if exists {
-				allowUnsafePath, err = strconv.ParseBool(allowUnsafePathAnnotation)
+				allowUnsafePath, err = strconv.ParseBool(allowUnsafePathPattern)
 				if err != nil {
-					logrus.Warnf("failed to parse allow-unsafe-path-pattern annotation %v, defaulting to false: %v", allowUnsafePathAnnotation, err)
+					logrus.Warnf("failed to parse allowUnsafePathPattern %v, defaulting to false: %v", allowUnsafePathPattern, err)
 					allowUnsafePath = false
 				}
+			} else {
+				// Read from storageclass annotation for backward compatibility
+				allowUnsafePathAnnotation, exists := opts.StorageClass.GetAnnotations()["allowUnsafePathPattern"]
+				if exists {
+					allowUnsafePath, err = strconv.ParseBool(allowUnsafePathAnnotation)
+					if err != nil {
+						logrus.Warnf("failed to parse allow-unsafe-path-pattern annotation %v, defaulting to false: %v", allowUnsafePathAnnotation, err)
+						allowUnsafePath = false
+					}
+				}
+			}
+			folderName, err = pathFromPattern(pathPattern, opts, allowUnsafePath)
+			if err != nil {
+				err = errors.Wrapf(err, "failed to create path from pattern %v", pathPattern)
+				return nil, pvController.ProvisioningFinished, err
+			}
+			// Check for directory traversal attempts in the path.
+			if !allowUnsafePath && !filepath.IsLocal(folderName) {
+				return nil, pvController.ProvisioningFinished, fmt.Errorf("folder path contains invalid references: %s", folderName)
 			}
 		}
-		folderName, err = pathFromPattern(pathPattern, opts, allowUnsafePath)
-		if err != nil {
-			err = errors.Wrapf(err, "failed to create path from pattern %v", pathPattern)
-			return nil, pvController.ProvisioningFinished, err
-		}
-		// Check for directory traversal attempts in the path.
-		if !allowUnsafePath && !filepath.IsLocal(folderName) {
-			return nil, pvController.ProvisioningFinished, fmt.Errorf("folder path contains invalid references: %s", folderName)
-		}
+		path = filepath.Join(basePath, folderName)
 	}
 
-	path := filepath.Join(basePath, folderName)
 	if nodeName == "" {
 		logrus.Infof("Creating volume %v at %v", name, path)
 	} else {
@@ -421,11 +457,48 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 	}
 
 	storage := pvc.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
+	p.configMutex.RLock()
+	setupCommand := p.config.SetupCommand
+	p.configMutex.RUnlock()
 	provisionCmd := make([]string, 0, 2)
-	if p.config.SetupCommand == "" {
+	if setupCommand == "" {
 		provisionCmd = append(provisionCmd, "/bin/sh", "/script/setup")
 	} else {
-		provisionCmd = append(provisionCmd, p.config.SetupCommand)
+		provisionCmd = append(provisionCmd, setupCommand)
+	}
+	var user, group, perm string
+	userPattern, exists := opts.StorageClass.Parameters["userPattern"]
+	if !exists {
+		userPattern, exists = opts.StorageClass.GetAnnotations()[userPatternAnnotationKey]
+	}
+	if exists {
+		user, err = dataFromPattern(userPattern, opts)
+		if err != nil {
+			err = errors.Wrapf(err, "failed to create user from pattern %v", userPattern)
+			return nil, pvController.ProvisioningFinished, err
+		}
+	}
+	groupPattern, exists := opts.StorageClass.Parameters["groupPattern"]
+	if !exists {
+		groupPattern, exists = opts.StorageClass.GetAnnotations()[groupPatternAnnotationKey]
+	}
+	if exists {
+		group, err = dataFromPattern(groupPattern, opts)
+		if err != nil {
+			err = errors.Wrapf(err, "failed to create group from pattern %v", groupPattern)
+			return nil, pvController.ProvisioningFinished, err
+		}
+	}
+	permPattern, exists := opts.StorageClass.Parameters["permPattern"]
+	if !exists {
+		permPattern, exists = opts.StorageClass.GetAnnotations()[permPatternAnnotationKey]
+	}
+	if exists {
+		perm, err = dataFromPattern(permPattern, opts)
+		if err != nil {
+			err = errors.Wrapf(err, "failed to create perm from pattern %v", permPattern)
+			return nil, pvController.ProvisioningFinished, err
+		}
 	}
 	if err := p.createHelperPod(ActionTypeCreate, provisionCmd, volumeOptions{
 		Name:        name,
@@ -433,6 +506,9 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 		Mode:        *pvc.Spec.VolumeMode,
 		SizeInBytes: storage.Value(),
 		Node:        nodeName,
+		User:        user,
+		Group:       group,
+		Perm:        perm,
 	}, c); err != nil {
 		return nil, pvController.ProvisioningFinished, err
 	}
@@ -453,35 +529,33 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 	if err != nil {
 		return nil, pvController.ProvisioningFinished, err
 	}
+	if sharedFS && pvs.HostPath != nil {
+		hostPathType := v1.HostPathDirectory
+		pvs.HostPath.Type = &hostPathType
+	}
 
+	affinityKey := c.NodeAffinityKey
 	var nodeAffinity *v1.VolumeNodeAffinity
 	if sharedFS {
-		// In shared filesystem mode, optionally require the label key to exist
-		// so workloads avoid nodes that do not have the shared mount.
-		if storageClass.Parameters != nil {
-			if key, ok := storageClass.Parameters["nodeAffinityKey"]; ok && key != "" {
-				nodeAffinity = &v1.VolumeNodeAffinity{
-					Required: &v1.NodeSelector{
-						NodeSelectorTerms: []v1.NodeSelectorTerm{
-							{
-								MatchExpressions: []v1.NodeSelectorRequirement{
-									{
-										Key:      key,
-										Operator: v1.NodeSelectorOpExists,
-									},
+		if affinityKey != "" {
+			nodeAffinity = &v1.VolumeNodeAffinity{
+				Required: &v1.NodeSelector{
+					NodeSelectorTerms: []v1.NodeSelectorTerm{
+						{
+							MatchExpressions: []v1.NodeSelectorRequirement{
+								{
+									Key:      affinityKey,
+									Operator: v1.NodeSelectorOpExists,
 								},
 							},
 						},
 					},
-				}
+				},
 			}
 		}
 	} else {
-		affinityKey := DefaultNodeAffinityKey
-		if storageClass.Parameters != nil {
-			if key, ok := storageClass.Parameters["nodeAffinityKey"]; ok && key != "" {
-				affinityKey = key
-			}
+		if affinityKey == "" {
+			affinityKey = DefaultNodeAffinityKey
 		}
 		valueNode, ok := node.GetLabels()[affinityKey]
 		if !ok {
@@ -523,111 +597,25 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 	}, pvController.ProvisioningFinished, nil
 }
 
-func (p *LocalPathProvisioner) Delete(_ context.Context, pv *v1.PersistentVolume) (err error) {
-	cfg, err := p.pickConfig(pv.Spec.StorageClassName)
-	if err != nil {
-		return err
-	}
-	return p.deleteFor(pv, cfg)
+func (p *LocalPathProvisioner) Delete(_ context.Context, pv *v1.PersistentVolume) error {
+	return p.deleteFor(pv)
 }
 
-func (p *LocalPathProvisioner) deleteFor(pv *v1.PersistentVolume, c *StorageClassConfig) (err error) {
-	defer func() {
-		err = errors.Wrapf(err, "failed to delete volume %v", pv.Name)
-	}()
+func (p *LocalPathProvisioner) deleteFor(pv *v1.PersistentVolume) error {
+	if pv == nil {
+		return fmt.Errorf("cannot reclaim a nil persistent volume")
+	}
+	path := "<not recorded on PV>"
+	if pv.Spec.HostPath != nil {
+		path = pv.Spec.HostPath.Path
+	} else if pv.Spec.Local != nil {
+		path = pv.Spec.Local.Path
+	}
 
-	path, node, err := p.getPathAndNodeForPV(pv, c)
-	if err != nil {
-		return err
-	}
-	if pv.Spec.PersistentVolumeReclaimPolicy != v1.PersistentVolumeReclaimRetain {
-		if node == "" {
-			logrus.Infof("Deleting volume %v at %v", pv.Name, path)
-		} else {
-			// Check if node still exists
-			if _, err := p.kubeClient.CoreV1().Nodes().Get(context.TODO(), node, metav1.GetOptions{}); err != nil && k8serror.IsNotFound(err) {
-				logrus.Infof("Node %v does not exist, skipping cleanup of volume %v", node, pv.Name)
-				return nil
-			}
-			logrus.Infof("Deleting volume %v at %v:%v", pv.Name, node, path)
-		}
-		storage := pv.Spec.Capacity[v1.ResourceName(v1.ResourceStorage)]
-		cleanupCmd := make([]string, 0, 2)
-		if p.config.TeardownCommand == "" {
-			cleanupCmd = append(cleanupCmd, "/bin/sh", "/script/teardown")
-		} else {
-			cleanupCmd = append(cleanupCmd, p.config.TeardownCommand)
-		}
-		if err := p.createHelperPod(ActionTypeDelete, cleanupCmd, volumeOptions{
-			Name:        pv.Name,
-			Path:        path,
-			Mode:        *pv.Spec.VolumeMode,
-			SizeInBytes: storage.Value(),
-			Node:        node,
-		}, c); err != nil {
-			logrus.Infof("clean up volume %v failed: %v", pv.Name, err)
-			return err
-		}
-		return nil
-	}
-	logrus.Infof("Retained volume %v", pv.Name)
+	// A nil return lets the external controller reclaim the PV object, never the facility data.
+	logrus.WithFields(logrus.Fields{"volume": pv.Name, "path": path}).
+		Info("Retained volume data; allowing PV API object reclamation")
 	return nil
-}
-
-func (p *LocalPathProvisioner) getPathAndNodeForPV(pv *v1.PersistentVolume, cfg *StorageClassConfig) (path, node string, err error) {
-	defer func() {
-		err = errors.Wrapf(err, "failed to delete volume %v", pv.Name)
-	}()
-
-	volumeSource := pv.Spec.PersistentVolumeSource
-	if volumeSource.HostPath != nil && volumeSource.Local == nil {
-		path = volumeSource.HostPath.Path
-	} else if volumeSource.Local != nil && volumeSource.HostPath == nil {
-		path = volumeSource.Local.Path
-	} else {
-		return "", "", fmt.Errorf("no path set")
-	}
-
-	sharedFS, err := p.isSharedFilesystem(cfg)
-	if err != nil {
-		return "", "", err
-	}
-
-	if sharedFS {
-		// We don't have affinity and can use any node
-		return path, "", nil
-	}
-
-	// Dealing with local filesystem
-
-	nodeAffinity := pv.Spec.NodeAffinity
-	if nodeAffinity == nil {
-		return "", "", fmt.Errorf("no NodeAffinity set")
-	}
-	required := nodeAffinity.Required
-	if required == nil {
-		return "", "", fmt.Errorf("no NodeAffinity.Required set")
-	}
-
-	node = ""
-	for _, selectorTerm := range required.NodeSelectorTerms {
-		for _, expression := range selectorTerm.MatchExpressions {
-			if expression.Operator == v1.NodeSelectorOpIn {
-				if len(expression.Values) != 1 {
-					return "", "", fmt.Errorf("multiple values for the node affinity")
-				}
-				node = expression.Values[0]
-				break
-			}
-		}
-		if node != "" {
-			break
-		}
-	}
-	if node == "" {
-		return "", "", fmt.Errorf("cannot find affinited node")
-	}
-	return path, node, nil
 }
 
 type volumeOptions struct {
@@ -636,12 +624,18 @@ type volumeOptions struct {
 	Mode        v1.PersistentVolumeMode
 	SizeInBytes int64
 	Node        string
+	User        string
+	Group       string
+	Perm        string
 }
 
 func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, o volumeOptions, cfg *StorageClassConfig) (err error) {
 	defer func() {
 		err = errors.Wrapf(err, "failed to %v volume %v", action, o.Name)
 	}()
+	if action != ActionTypeCreate {
+		return fmt.Errorf("filesystem deletion is disabled: unsupported helper action %q", action)
+	}
 	sharedFS, err := p.isSharedFilesystem(cfg)
 	if err != nil {
 		return err
@@ -652,9 +646,17 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 	if !filepath.IsAbs(o.Path) {
 		return fmt.Errorf("volume path %s is not absolute", o.Path)
 	}
-	o.Path = filepath.Clean(o.Path)
-	parentDir, volumeDir := filepath.Split(o.Path)
-	hostPathType := v1.HostPathDirectoryOrCreate
+	parentDir, volumeDir := o.Path, ""
+	hostPathType := v1.HostPathDirectory
+	if sharedFS {
+		if o.Path != cfg.SharedFileSystemPath || filepath.Clean(o.Path) == "/" {
+			return fmt.Errorf("shared filesystem helper must mount the configured non-root facility path")
+		}
+	} else {
+		o.Path = filepath.Clean(o.Path)
+		parentDir, volumeDir = filepath.Split(o.Path)
+		hostPathType = v1.HostPathDirectoryOrCreate
+	}
 	lpvVolumes := []v1.Volume{
 		{
 			Name: helperDataVolName,
@@ -673,21 +675,17 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 			Effect:   v1.TaintEffectNoSchedule,
 		},
 	}
+	p.configMutex.RLock()
 	helperPod := p.helperPod.DeepCopy()
+	cmdTimeoutSeconds := p.config.CmdTimeoutSeconds
+	p.configMutex.RUnlock()
 
-	keyToPathItems := make([]v1.KeyToPath, 0, 2)
+	keyToPathItems := make([]v1.KeyToPath, 0, 1)
 
-	if p.config.SetupCommand == "" {
+	if len(cmd) == 2 && cmd[0] == "/bin/sh" && cmd[1] == "/script/setup" {
 		keyToPathItems = append(keyToPathItems, v1.KeyToPath{
 			Key:  "setup",
 			Path: "setup",
-		})
-	}
-
-	if p.config.TeardownCommand == "" {
-		keyToPathItems = append(keyToPathItems, v1.KeyToPath{
-			Key:  "teardown",
-			Path: "teardown",
 		})
 	}
 
@@ -709,17 +707,28 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 	}
 
 	dataMount := addVolumeMount(&helperPod.Spec.Containers[0].VolumeMounts, helperDataVolName, parentDir)
-	parentDir = dataMount.MountPath
-	parentDir = strings.TrimSuffix(parentDir, string(filepath.Separator))
-	volumeDir = strings.TrimSuffix(volumeDir, string(filepath.Separator))
-	if parentDir == "" || volumeDir == "" || !filepath.IsAbs(parentDir) {
-		// it covers the `/` case
-		return fmt.Errorf("invalid path %v for %v: cannot find parent dir or volume dir or parent dir is relative", action, o.Path)
+	volumePath := o.Path
+	if sharedFS {
+		if dataMount.MountPath != o.Path || dataMount.SubPath != "" || dataMount.SubPathExpr != "" {
+			return fmt.Errorf("shared filesystem helper must not override the facility root mount")
+		}
+		dataMount.ReadOnly = true
+	} else {
+		parentDir = strings.TrimSuffix(dataMount.MountPath, string(filepath.Separator))
+		volumeDir = strings.TrimSuffix(volumeDir, string(filepath.Separator))
+		if parentDir == "" || volumeDir == "" || !filepath.IsAbs(parentDir) {
+			// it covers the `/` case
+			return fmt.Errorf("invalid path %v for %v: cannot find parent dir or volume dir or parent dir is relative", action, o.Path)
+		}
+		volumePath = filepath.Join(parentDir, volumeDir)
 	}
 	env := []v1.EnvVar{
-		{Name: envVolDir, Value: filepath.Join(parentDir, volumeDir)},
+		{Name: envVolDir, Value: volumePath},
 		{Name: envVolMode, Value: string(o.Mode)},
 		{Name: envVolSize, Value: strconv.FormatInt(o.SizeInBytes, 10)},
+		{Name: envVolUser, Value: o.User},
+		{Name: envVolGroup, Value: o.Group},
+		{Name: envVolPerm, Value: o.Perm},
 	}
 
 	// use different name for helper pods
@@ -729,7 +738,11 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 		helperPod.Name = helperPod.Name[:HelperPodNameMaxLength]
 	}
 	helperPod.Namespace = p.namespace
-	if helperPod.Spec.NodeName == "" && o.Node != "" {
+	if sharedFS && cfg.NodeAffinityKey != "" {
+		if err := constrainHelperToMount(helperPod, cfg.NodeAffinityKey); err != nil {
+			return err
+		}
+	} else if helperPod.Spec.NodeName == "" && o.Node != "" {
 		helperPod.Spec.NodeName = o.Node
 	}
 	helperPod.Spec.ServiceAccountName = p.serviceAccountName
@@ -740,7 +753,7 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 	helperPod.Spec.Volumes = append(helperPod.Spec.Volumes, lpvVolumes...)
 	helperPod.Spec.Containers[0].Command = cmd
 	helperPod.Spec.Containers[0].Env = append(helperPod.Spec.Containers[0].Env, env...)
-	helperPod.Spec.Containers[0].Args = []string{"-p", filepath.Join(parentDir, volumeDir),
+	helperPod.Spec.Containers[0].Args = []string{"-p", volumePath,
 		"-s", strconv.FormatInt(o.SizeInBytes, 10),
 		"-m", string(o.Mode),
 		"-a", string(action)}
@@ -765,7 +778,7 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 	}()
 
 	completed := false
-	for i := 0; i < p.config.CmdTimeoutSeconds; i++ {
+	for i := 0; i < cmdTimeoutSeconds; i++ {
 		if pod, err := p.kubeClient.CoreV1().Pods(p.namespace).Get(context.TODO(), helperPod.Name, metav1.GetOptions{}); err != nil {
 			return err
 		} else if pod.Status.Phase == v1.PodSucceeded {
@@ -775,13 +788,47 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 		time.Sleep(1 * time.Second)
 	}
 	if !completed {
-		return fmt.Errorf("create process timeout after %v seconds", p.config.CmdTimeoutSeconds)
+		return fmt.Errorf("create process timeout after %v seconds", cmdTimeoutSeconds)
 	}
 
 	if o.Node == "" {
 		logrus.Infof("Volume %v has been %vd on %v", o.Name, action, o.Path)
 	} else {
 		logrus.Infof("Volume %v has been %vd on %v:%v", o.Name, action, o.Node, o.Path)
+	}
+	return nil
+}
+
+func constrainHelperToMount(pod *v1.Pod, key string) error {
+	if pod.Spec.NodeName != "" {
+		return fmt.Errorf("shared filesystem helper nodeName would bypass mount node affinity")
+	}
+	if pod.Spec.Affinity == nil {
+		pod.Spec.Affinity = &v1.Affinity{}
+	}
+	if pod.Spec.Affinity.NodeAffinity == nil {
+		pod.Spec.Affinity.NodeAffinity = &v1.NodeAffinity{}
+	}
+	affinity := pod.Spec.Affinity.NodeAffinity
+	requirement := v1.NodeSelectorRequirement{Key: key, Operator: v1.NodeSelectorOpExists}
+	if affinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		affinity.RequiredDuringSchedulingIgnoredDuringExecution = &v1.NodeSelector{
+			NodeSelectorTerms: []v1.NodeSelectorTerm{{MatchExpressions: []v1.NodeSelectorRequirement{requirement}}},
+		}
+		return nil
+	}
+	hasTerm := false
+	for i := range affinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+		term := &affinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i]
+		// Terms are ORed; intersect each non-empty term and preserve empty (match-nothing) terms.
+		if len(term.MatchExpressions) == 0 && len(term.MatchFields) == 0 {
+			continue
+		}
+		term.MatchExpressions = append(term.MatchExpressions, requirement)
+		hasTerm = true
+	}
+	if !hasTerm {
+		return fmt.Errorf("shared filesystem helper node affinity has no schedulable terms")
 	}
 	return nil
 }
@@ -869,6 +916,15 @@ func canonicalizeStorageClassConfig(data *StorageClassConfigData) (cfg *StorageC
 	}()
 	cfg = &StorageClassConfig{}
 	cfg.SharedFileSystemPath = data.SharedFileSystemPath
+	if cfg.SharedFileSystemPath != "" && (!filepath.IsAbs(cfg.SharedFileSystemPath) || filepath.Clean(cfg.SharedFileSystemPath) == "/") {
+		return nil, fmt.Errorf("sharedFileSystemPath must be an absolute non-root path: %q", cfg.SharedFileSystemPath)
+	}
+	cfg.NodeAffinityKey = data.NodeAffinityKey
+	if cfg.NodeAffinityKey != "" {
+		if problems := validation.IsQualifiedName(cfg.NodeAffinityKey); len(problems) != 0 {
+			return nil, fmt.Errorf("invalid nodeAffinityKey %q: %s", cfg.NodeAffinityKey, strings.Join(problems, "; "))
+		}
+	}
 	cfg.NodePathMap = map[string]*NodePathMap{}
 	for _, n := range data.NodePathMap {
 		if cfg.NodePathMap[n.Node] != nil {

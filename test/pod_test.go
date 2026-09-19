@@ -43,6 +43,16 @@ func (p *PodTestSuite) SetupSuite() {
 	cmds := []string{
 		fmt.Sprintf("kind create cluster --config=%s --wait=120s", testdataFile("kind-cluster.yaml")),
 		fmt.Sprintf("kind load docker-image %s", p.config.IMAGE),
+		// kind ships its own local-path-provisioner: the "standard" default StorageClass and a
+		// "local-path-provisioner" Deployment in the "local-path-storage" namespace, both using
+		// the provisioner name "rancher.io/local-path" - identical to the provisioner under test.
+		// Since the provisioner runs without leader election, kind's built-in provisioner races
+		// the test-deployed provisioner and may provision volumes without the features under test
+		// (e.g. the custom nodeAffinityKey). Remove it so the test-deployed provisioner is the
+		// only one servicing "rancher.io/local-path" claims.
+		"kubectl -n local-path-storage delete deployment local-path-provisioner --ignore-not-found",
+		"kubectl -n local-path-storage wait --for=delete pod --all --timeout=120s || true",
+		"kubectl delete storageclass standard --ignore-not-found",
 	}
 	for _, cmd := range cmds {
 		_, err = runCmd(
@@ -171,17 +181,27 @@ func (p *PodTestSuite) TestPodWithCustomNodeAffinityKey() {
 
 	runTest(p, []string{p.config.IMAGE}, "ready", hostPathVolumeType)
 
-	// Verify the PV was created with the custom node affinity key
-	affinityCmd := `kubectl get pv -o jsonpath='{.items[0].spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].key}'`
-	c := createCmd(p.T(), affinityCmd, kustomizeDir, p.config.envs(), nil)
+	// Resolve the PV bound to this test's PVC. The shared cluster may hold PVs
+	// from other tests, so selecting by index (.items[0]) is not reliable.
+	pvNameCmd := `kubectl get pvc local-path-pvc -o jsonpath='{.spec.volumeName}'`
+	c := createCmd(p.T(), pvNameCmd, kustomizeDir, p.config.envs(), nil)
 	output, err := c.CombinedOutput()
+	if err != nil {
+		p.FailNow("", "failed to get PV name", err)
+	}
+	pvName := strings.Trim(string(output), "'")
+
+	// Verify the PV was created with the custom node affinity key
+	affinityCmd := fmt.Sprintf(`kubectl get pv %s -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].key}'`, pvName)
+	c = createCmd(p.T(), affinityCmd, kustomizeDir, p.config.envs(), nil)
+	output, err = c.CombinedOutput()
 	if err != nil {
 		p.FailNow("", "failed to get PV node affinity key", err)
 	}
 	p.Equal(customLabel, strings.Trim(string(output), "'"), "PV should use the custom node affinity key")
 
 	// Verify the affinity value matches what was set on the node
-	valueCmd := `kubectl get pv -o jsonpath='{.items[0].spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}'`
+	valueCmd := fmt.Sprintf(`kubectl get pv %s -o jsonpath='{.spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]}'`, pvName)
 	c = createCmd(p.T(), valueCmd, kustomizeDir, p.config.envs(), nil)
 	output, err = c.CombinedOutput()
 	if err != nil {
@@ -194,6 +214,24 @@ func (p *PodTestSuite) TestPodWithCustomPathPatternStorageClasses() {
 	p.kustomizeDir = "custom-path-pattern"
 
 	runTest(p, []string{p.config.IMAGE}, "ready", hostPathVolumeType)
+}
+
+func (p *PodTestSuite) TestPodWithUserGroupPermPattern() {
+	p.kustomizeDir = "pod-with-perm-pattern"
+	kustomizeDir := testdataFile(p.kustomizeDir)
+
+	runTest(p, []string{p.config.IMAGE}, "ready", hostPathVolumeType)
+
+	// The storage class sets userPattern=1000, groupPattern=2000 and permPattern=0700,
+	// which the setup script applies to the volume directory via chown/chmod. Inspect the
+	// mounted directory from inside the pod to confirm the patterns took effect.
+	statCmd := "kubectl exec volume-test -- stat -c '%a %u %g' /data"
+	c := createCmd(p.T(), statCmd, kustomizeDir, p.config.envs(), nil)
+	output, err := c.CombinedOutput()
+	if err != nil {
+		p.FailNow("", "failed to stat volume dir", string(output), err)
+	}
+	p.Equal("700 1000 2000", strings.TrimSpace(string(output)), "volume dir should reflect user/group/perm patterns")
 }
 
 func (p *PodTestSuite) TestPodWithSkipPathPatternCheck() {
@@ -326,14 +364,33 @@ func runTest(p *PodTestSuite, images []string, waitCondition, volumeType string)
 		}
 	}
 
-	typeCheckCmd := fmt.Sprintf("kubectl get pv $(%s) -o jsonpath='{.spec.%s}'", "kubectl get pv -o jsonpath='{.items[0].metadata.name}'", volumeType)
-	c := createCmd(p.T(), typeCheckCmd, kustomizeDir, p.config.envs(), nil)
-	typeCheckOutput, err := c.CombinedOutput()
-	if err != nil {
-		p.FailNow("", "failed to check volume type: %v", err)
-	}
-	if len(typeCheckOutput) == 0 || !strings.Contains(string(typeCheckOutput), "path") {
-		p.FailNow("volume Type not correct")
+	// Verify a PV of the expected type was provisioned for this test. Resolve PVs through
+	// the PVCs that currently exist in the namespace rather than picking the first PV in
+	// the cluster (.items[0]), which on the shared cluster may be a leftover PV orphaned
+	// by a previous test. Retry to absorb the provisioning delay when the caller only
+	// waits for the pod to be scheduled.
+	typeCheckCmd := fmt.Sprintf(
+		"for pv in $(kubectl get pvc -o jsonpath='{.items[*].spec.volumeName}'); do kubectl get pv \"$pv\" -o jsonpath='{.spec.%s}'; echo; done",
+		volumeType,
+	)
+
+	var lastOutput string
+	deadline := time.After(120 * time.Second)
+	tick := time.Tick(2 * time.Second)
+	for {
+		c := createCmd(p.T(), typeCheckCmd, kustomizeDir, p.config.envs(), nil)
+		typeCheckOutput, err := c.CombinedOutput()
+		lastOutput = string(typeCheckOutput)
+		if err == nil && strings.Contains(lastOutput, "path") {
+			return
+		}
+
+		select {
+		case <-deadline:
+			p.FailNow("volume Type not correct", "got: %q", lastOutput)
+			return
+		case <-tick:
+		}
 	}
 }
 

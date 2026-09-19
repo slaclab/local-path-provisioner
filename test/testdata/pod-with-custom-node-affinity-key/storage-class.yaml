@@ -3,7 +3,5 @@ kind: StorageClass
 metadata:
   name: local-path-custom-affinity
 provisioner: rancher.io/local-path
-parameters:
-  nodeAffinityKey: test.example.com/stable-id
 volumeBindingMode: WaitForFirstConsumer
 reclaimPolicy: Delete
