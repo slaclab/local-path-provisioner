@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	pvController "sigs.k8s.io/sig-storage-lib-external-provisioner/v11/controller"
 )
 
 func TestS3DFSharedRoot(t *testing.T) {
@@ -16,7 +17,7 @@ func TestS3DFSharedRoot(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			t.Parallel()
 			p, client := newS3DFTestProvisioner(t, fmt.Sprintf(`{"sharedFileSystemPath":%q}`, path))
-			for i, mode := range []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce, v1.ReadWriteOncePod, v1.ReadOnlyMany, v1.ReadWriteMany} {
+			for i, mode := range []v1.PersistentVolumeAccessMode{v1.ReadOnlyMany, v1.ReadWriteMany} {
 				opts := s3dfTestOptions()
 				opts.PVName = fmt.Sprintf("pv-%d", i)
 				opts.PVC.Name = fmt.Sprintf("claim-%d", i)
@@ -30,7 +31,7 @@ func TestS3DFSharedRoot(t *testing.T) {
 				require.Equal(t, opts.PVC.Spec.Resources.Requests, pv.Spec.Capacity)
 			}
 			helpers := s3dfCreatedHelpers(client)
-			require.Len(t, helpers, 4)
+			require.Len(t, helpers, 2)
 			for _, pod := range helpers {
 				for _, volume := range pod.Spec.Volumes {
 					if volume.Name == helperDataVolName {
@@ -58,7 +59,7 @@ func TestS3DFNodeLocalSubdirectories(t *testing.T) {
 			t.Run(volumeType+"/"+pattern, func(t *testing.T) {
 				t.Parallel()
 				p, client := newS3DFTestProvisioner(t, `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/local"]}]}`)
-				opts := s3dfTestOptions()
+				opts := s3dfNodeLocalTestOptions()
 				opts.SelectedNode = &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
 				opts.StorageClass.Annotations = map[string]string{"defaultVolumeType": volumeType}
 				want := "/local/pv-test_science_claim"
@@ -146,6 +147,54 @@ func TestS3DFSharedHelperMountOverrideRejected(t *testing.T) {
 			_, _, err := p.Provision(t.Context(), s3dfTestOptions())
 			require.ErrorContains(t, err, "shared filesystem")
 			require.Zero(t, len(s3dfCreatedHelpers(client)))
+		})
+	}
+}
+
+func TestS3DFSharedAccessModesRejected(t *testing.T) {
+	t.Parallel()
+	const config = `{"sharedFileSystemPath":"/sdf/data/lcls"}`
+	rejected := map[string]struct {
+		modes []v1.PersistentVolumeAccessMode
+		want  string
+	}{
+		"RWO":      {[]v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}, "ReadWriteOnce is not supported"},
+		"RWOP":     {[]v1.PersistentVolumeAccessMode{v1.ReadWriteOncePod}, "ReadWriteOncePod is not supported"},
+		"RWX+RWO":  {[]v1.PersistentVolumeAccessMode{v1.ReadWriteMany, v1.ReadWriteOnce}, "ReadWriteOnce is not supported"},
+		"ROX+RWOP": {[]v1.PersistentVolumeAccessMode{v1.ReadOnlyMany, v1.ReadWriteOncePod}, "ReadWriteOncePod is not supported"},
+		"empty":    {nil, "no access mode requested"},
+	}
+	for name, tt := range rejected {
+		t.Run("rejected/"+name, func(t *testing.T) {
+			t.Parallel()
+			p, client := newS3DFTestProvisioner(t, config)
+			opts := s3dfTestOptions()
+			opts.PVC.Spec.AccessModes = tt.modes
+			pv, state, err := p.Provision(t.Context(), opts)
+			require.ErrorContains(t, err, "sharedFileSystemPath only supports ReadWriteMany and ReadOnlyMany access modes")
+			require.ErrorContains(t, err, tt.want)
+			require.Nil(t, pv)
+			require.Equal(t, pvController.ProvisioningFinished, state)
+			require.Empty(t, s3dfCreatedHelpers(client), "a rejected claim must not touch the share")
+		})
+	}
+	accepted := map[string][]v1.PersistentVolumeAccessMode{
+		"RWX":     {v1.ReadWriteMany},
+		"ROX":     {v1.ReadOnlyMany},
+		"RWX+ROX": {v1.ReadWriteMany, v1.ReadOnlyMany},
+	}
+	for name, modes := range accepted {
+		t.Run("accepted/"+name, func(t *testing.T) {
+			t.Parallel()
+			p, client := newS3DFTestProvisioner(t, config)
+			opts := s3dfTestOptions()
+			opts.PVC.Spec.AccessModes = modes
+			pv, state, err := p.Provision(t.Context(), opts)
+			require.NoError(t, err)
+			require.Equal(t, pvController.ProvisioningFinished, state)
+			require.Equal(t, modes, pv.Spec.AccessModes)
+			require.Equal(t, s3dfTestPath, pv.Spec.HostPath.Path)
+			require.Len(t, s3dfCreatedHelpers(client), 1)
 		})
 	}
 }

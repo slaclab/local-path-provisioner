@@ -68,13 +68,21 @@ func s3dfTestOptions() pvController.ProvisionOptions {
 			Spec: v1.PersistentVolumeClaimSpec{
 				StorageClassName: &class,
 				VolumeMode:       &mode,
-				AccessModes:      []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
+				AccessModes:      []v1.PersistentVolumeAccessMode{v1.ReadWriteMany},
 				Resources: v1.VolumeResourceRequirements{
 					Requests: v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
 				},
 			},
 		},
 	}
+}
+
+// s3dfNodeLocalTestOptions returns s3dfTestOptions with the single-node access
+// mode that node-local (nodePathMap) provisioning requires.
+func s3dfNodeLocalTestOptions() pvController.ProvisionOptions {
+	opts := s3dfTestOptions()
+	opts.PVC.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
+	return opts
 }
 
 func s3dfCreatedHelpers(client *fake.Clientset) []*v1.Pod {

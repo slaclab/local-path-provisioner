@@ -124,7 +124,7 @@ func TestS3DFNodeLocalOwnershipPatterns(t *testing.T) {
 	t.Parallel()
 	for _, annotation := range []bool{false, true} {
 		p, client := newS3DFTestProvisioner(t, `{"nodePathMap":[{"node":"DEFAULT_PATH_FOR_NON_LISTED_NODES","paths":["/local"]}]}`)
-		opts := s3dfTestOptions()
+		opts := s3dfNodeLocalTestOptions()
 		opts.SelectedNode = &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
 		opts.PVC.Labels = map[string]string{"uid": "1000", "gid": "2000"}
 		patterns := map[string]string{"userPattern": "{{ .PVC.Labels.uid }}", "groupPattern": "{{ .PVC.Labels.gid }}", "permPattern": "0700"}

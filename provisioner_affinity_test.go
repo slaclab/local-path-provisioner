@@ -80,6 +80,9 @@ func TestS3DFAffinitySource(t *testing.T) {
 			t.Parallel()
 			p, _ := newS3DFTestProvisioner(t, tt.config)
 			opts := s3dfTestOptions()
+			if tt.node != nil { // node-local cases
+				opts = s3dfNodeLocalTestOptions()
+			}
 			opts.SelectedNode = tt.node
 			if tt.legacyKeys {
 				opts.StorageClass.Annotations = map[string]string{"local.path.provisioner/node-affinity-key": "ignored.example/annotation"}

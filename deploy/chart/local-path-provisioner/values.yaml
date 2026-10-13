@@ -91,8 +91,8 @@ nodePathMap:
       - /opt/local-path-provisioner
 
 # `sharedFileSystemPath` brokers the pre-existing facility root, not per-PVC subdirectories.
-# The root must already exist on eligible nodes. All access modes are supported: `ReadWriteOnce`,
-# `ReadOnlyMany` and `ReadWriteMany` for storage claims. In addition
+# The root must already exist on eligible nodes. Only `ReadWriteMany` and `ReadOnlyMany` claims are
+# supported; `ReadWriteOnce` and `ReadWriteOncePod` are rejected. In addition
 # `volumeBindingMode: Immediate` can be used in  StorageClass definition.
 # Please note that `nodePathMap` and `sharedFileSystemPath` are mutually exclusive.
 # If `sharedFileSystemPath` is used, then `nodePathMap` must be set to `[]`.

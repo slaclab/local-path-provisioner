@@ -383,6 +383,18 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 		if node == nil {
 			return nil, pvController.ProvisioningFinished, fmt.Errorf("configuration error, no node was specified")
 		}
+	} else {
+		// Shared facility roots are multi-node by nature; single-node modes
+		// (ReadWriteOnce, ReadWriteOncePod) are not supported, matching the
+		// legacy S3DF image.
+		if len(pvc.Spec.AccessModes) == 0 {
+			return nil, pvController.ProvisioningFinished, fmt.Errorf("sharedFileSystemPath only supports ReadWriteMany and ReadOnlyMany access modes: no access mode requested")
+		}
+		for _, accessMode := range pvc.Spec.AccessModes {
+			if accessMode != v1.ReadWriteMany && accessMode != v1.ReadOnlyMany {
+				return nil, pvController.ProvisioningFinished, fmt.Errorf("sharedFileSystemPath only supports ReadWriteMany and ReadOnlyMany access modes: %s is not supported", accessMode)
+			}
+		}
 	}
 
 	nodeName := ""

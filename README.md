@@ -204,7 +204,7 @@ never creates a cleanup helper and does not free filesystem space on PVC deletio
 `sharedFileSystemPath` is the pre-existing facility root used verbatim by every PV
 from that configuration, without a per-PVC subdirectory. `nodeAffinityKey` in the
 same ConfigMap identifies the node label advertising mount availability.
-In this case all access modes are supported: `ReadWriteOnce`, `ReadOnlyMany` and `ReadWriteMany` for storage claims.
+In this case only `ReadWriteMany` and `ReadOnlyMany` claims are supported; `ReadWriteOnce` and `ReadWriteOncePod` are rejected.
 
 `storageClassConfigs` is a map from storage class names to objects containing `nodePathMap` or `sharedFilesystemPath`, as described above.
 
