@@ -33,6 +33,9 @@ const ActionTypeCreate = "create"
 
 const (
 	DefaultNodeAffinityKey = "kubernetes.io/hostname"
+	// SharedNodeAffinityValue is the label value a node must carry for the
+	// configured nodeAffinityKey to be eligible in shared-filesystem mode.
+	SharedNodeAffinityValue = "true"
 
 	NodeDefaultNonListedNodes = "DEFAULT_PATH_FOR_NON_LISTED_NODES"
 
@@ -555,10 +558,7 @@ func (p *LocalPathProvisioner) provisionFor(opts pvController.ProvisionOptions, 
 					NodeSelectorTerms: []v1.NodeSelectorTerm{
 						{
 							MatchExpressions: []v1.NodeSelectorRequirement{
-								{
-									Key:      affinityKey,
-									Operator: v1.NodeSelectorOpExists,
-								},
+								sharedMountRequirement(affinityKey),
 							},
 						},
 					},
@@ -811,6 +811,16 @@ func (p *LocalPathProvisioner) createHelperPod(action ActionType, cmd []string, 
 	return nil
 }
 
+// sharedMountRequirement selects nodes whose mount-health label is exactly
+// SharedNodeAffinityValue, so a node labeled "false" (or any other value) is excluded.
+func sharedMountRequirement(key string) v1.NodeSelectorRequirement {
+	return v1.NodeSelectorRequirement{
+		Key:      key,
+		Operator: v1.NodeSelectorOpIn,
+		Values:   []string{SharedNodeAffinityValue},
+	}
+}
+
 func constrainHelperToMount(pod *v1.Pod, key string) error {
 	if pod.Spec.NodeName != "" {
 		return fmt.Errorf("shared filesystem helper nodeName would bypass mount node affinity")
@@ -822,7 +832,7 @@ func constrainHelperToMount(pod *v1.Pod, key string) error {
 		pod.Spec.Affinity.NodeAffinity = &v1.NodeAffinity{}
 	}
 	affinity := pod.Spec.Affinity.NodeAffinity
-	requirement := v1.NodeSelectorRequirement{Key: key, Operator: v1.NodeSelectorOpExists}
+	requirement := sharedMountRequirement(key)
 	if affinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
 		affinity.RequiredDuringSchedulingIgnoredDuringExecution = &v1.NodeSelector{
 			NodeSelectorTerms: []v1.NodeSelectorTerm{{MatchExpressions: []v1.NodeSelectorRequirement{requirement}}},

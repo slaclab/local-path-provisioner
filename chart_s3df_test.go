@@ -85,7 +85,7 @@ storageClass:
 	require.Equal(t, v1.HostPathDirectory, *pv.Spec.HostPath.Type)
 	require.Equal(t, v1.PersistentVolumeReclaimDelete, pv.Spec.PersistentVolumeReclaimPolicy)
 	expression := pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0]
-	require.Equal(t, v1.NodeSelectorRequirement{Key: s3dfTestKey, Operator: v1.NodeSelectorOpExists}, expression)
+	require.Equal(t, v1.NodeSelectorRequirement{Key: s3dfTestKey, Operator: v1.NodeSelectorOpIn, Values: []string{SharedNodeAffinityValue}}, expression)
 }
 
 func TestS3DFChartPerClassKeys(t *testing.T) {

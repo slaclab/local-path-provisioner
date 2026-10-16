@@ -27,7 +27,7 @@ func TestS3DFHelperUsesMountAffinity(t *testing.T) {
 			require.Empty(t, helpers[0].Spec.NodeName)
 			require.NotNil(t, helpers[0].Spec.Affinity)
 			require.Equal(t, &v1.NodeSelector{NodeSelectorTerms: []v1.NodeSelectorTerm{{
-				MatchExpressions: []v1.NodeSelectorRequirement{{Key: s3dfTestKey, Operator: v1.NodeSelectorOpExists}},
+				MatchExpressions: []v1.NodeSelectorRequirement{{Key: s3dfTestKey, Operator: v1.NodeSelectorOpIn, Values: []string{SharedNodeAffinityValue}}},
 			}}}, helpers[0].Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution)
 		})
 	}
@@ -53,7 +53,7 @@ func TestS3DFHelperAffinityIntersectsTemplate(t *testing.T) {
 	expected := before.Spec.Affinity.DeepCopy()
 	for i := range 2 {
 		term := &expected.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[i]
-		term.MatchExpressions = append(term.MatchExpressions, v1.NodeSelectorRequirement{Key: s3dfTestKey, Operator: v1.NodeSelectorOpExists})
+		term.MatchExpressions = append(term.MatchExpressions, v1.NodeSelectorRequirement{Key: s3dfTestKey, Operator: v1.NodeSelectorOpIn, Values: []string{SharedNodeAffinityValue}})
 	}
 	_, _, err := p.Provision(t.Context(), s3dfTestOptions())
 	require.NoError(t, err)

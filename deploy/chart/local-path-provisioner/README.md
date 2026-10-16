@@ -39,8 +39,8 @@ storageClass:
 
 The key is rendered into ConfigMap `config.json`, never into the StorageClass.
 Old `storageClass.nodeAffinityKey` values and steering annotations are rejected.
-Shared PVs use the exact root and `Exists` affinity; remove the node label key
-when the mount is unhealthy. Reloads affect new PVs only.
+Shared PVs use the exact root and `In ["true"]` affinity; set the node label to
+`"false"` when the mount is unhealthy. Reloads affect new PVs only.
 
 The S3DF image honors `Delete` by reclaiming the PV API object while retaining all
 backing data, unconditionally. `Retain` still leaves the API object in place.
@@ -105,7 +105,7 @@ default values.
 | `storageClass.pathPattern`              | Template for the volume directory name                                          | `nil`                                                                                                                                                                                                                                                                                                                                            |
 | `storageClass.nodePath`                 | Optional fixed node path request passed as StorageClass parameter               | `nil`                                                                                                                                                                                                                                                                                                                                            |
 | `storageClass.allowUnsafePathPattern`   | Allow non-default pathPattern prefixes (advanced/unsafe)                       | `nil`                                                                                                                                                                                                                                                                                                                                            |
-| `nodeAffinityKey`                       | ConfigMap-only node label key; shared volumes use `Exists`, node-local volumes use `In` | `""` |
+| `nodeAffinityKey`                       | ConfigMap-only node label key; shared volumes use `In ["true"]`, node-local volumes use `In` | `""` |
 | `sharedFileSystemPath`                  | Pre-existing facility root mounted by every PV from this instance, without subdirectories | unset |
 | `nodePathMap`                           | Configuration of where to store the data on each node                           | `[{node: DEFAULT_PATH_FOR_NON_LISTED_NODES, paths: [/opt/local-path-provisioner]}]`                                                                                                                                                                                                                                                              |
 | `resources`                             | Local Path Provisioner resource requests & limits                               | `{}`                                                                                                                                                                                                                                                                                                                                             |

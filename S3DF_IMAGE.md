@@ -11,7 +11,7 @@ updates). It is not interchangeable with the stock Rancher image.
 | R1: retain filesystem data | `Delete` logs the PV name and path, touches neither nodes nor storage configuration, creates no Pods, and returns nil. The external provisioner controller then deletes the PV API object. |
 | Reclaim policy | The StorageClass policy is passed through unchanged. There is no `disableDelete` setting or policy override. |
 | R2: ConfigMap-only steering | `nodeAffinityKey` is part of the same configuration as the path. StorageClass parameters and steering annotations cannot supply it. |
-| Shared affinity | A configured key emits one `Exists` expression without values. An absent key emits no affinity and logs a warning. |
+| Shared affinity | A configured key emits one `In` expression with the single value `"true"`. An absent key emits no affinity and logs a warning. |
 | Node-local affinity | `In` with the selected node's label value; the default key remains `kubernetes.io/hostname`. |
 | R3: facility root | Every shared PV and setup helper uses `sharedFileSystemPath` verbatim, with no claim-specific subdirectory. Both shared hostPath types are `Directory`. |
 | Setup safety | Shared helpers mount the share itself, not its parent, read-only. They cannot redirect this mount with a custom mount path or subPath. |
@@ -51,8 +51,8 @@ the filesystem root. Configuration reloads preserve the last valid configuration
 on error and affect only future PVs, never existing PVs. Provisioning and helper
 template reads are synchronized with reloads.
 
-`Exists` ignores label values. Both `"true"` and `"false"` satisfy it; an unhealthy
-node must have the key removed. `Directory` checks that the directory exists, not
+Only the label value `"true"` satisfies the affinity. An unhealthy node can set the
+value to `"false"` (or remove the key) to stop new placements. `Directory` checks that the directory exists, not
 that the intended filesystem is mounted there. Accurate mount-health labels are
 still essential, particularly when an unmounted directory remains on local disk.
 Removing a label does not evict running consumers.
@@ -61,7 +61,7 @@ Removing a label does not evict running consumers.
 
 | Hazard | Decision |
 |---|---|
-| H1: helpers on unmounted nodes | Shared helpers require the configured label key. Each existing non-empty required-affinity term is intersected with `Exists`; other scheduling constraints are preserved. `nodeName` cannot bypass this. |
+| H1: helpers on unmounted nodes | Shared helpers require the configured label key set to `"true"`. Each existing non-empty required-affinity term is intersected with `In ["true"]`; other scheduling constraints are preserved. `nodeName` cannot bypass this. |
 | H2: implicit directory creation | Shared helpers and PVs use `Directory`. The helper mounts the exact root read-only, so setup cannot fabricate the share under an existing parent. |
 | H3: shared writers | Only RWX and ROX are supported, matching the legacy image; RWO and RWOP claims (alone or mixed) and claims with no access mode are rejected before any helper runs. All claims see the same data; capacity is advisory, with no per-claim isolation or fencing. Applications own writer coordination. |
 | H4: subdirectory/permission patterns | Shared provisioning rejects `pathPattern`, `allowUnsafePathPattern`, `userPattern`, `groupPattern`, and `permPattern` in parameters or annotations, including empty values. The last three are new upstream functionality that must not change facility-root ownership or permissions. |

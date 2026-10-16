@@ -343,10 +343,10 @@ Here the provisioner will use the path `/data/ssd` with a subdirectory per names
 }
 ```
 
-Shared mode emits exactly one `Exists` expression with the configured key and no
-values. Setup helpers require the same key. An empty key leaves PV affinity unset
-and logs a warning. Label values are irrelevant: remove the key, rather than set
-it to `"false"`, when a mount is unhealthy.
+Shared mode emits exactly one `In` expression with the configured key and the
+single value `"true"`. Setup helpers require the same key and value. An empty key
+leaves PV affinity unset and logs a warning. Set the label to `"false"` (or remove
+it) when a mount is unhealthy.
 
 Node-local mode emits `In` using the selected node's label value and defaults to
 `kubernetes.io/hostname` when the key is unset. The key can also be supplied inside

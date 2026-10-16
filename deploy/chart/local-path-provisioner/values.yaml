@@ -99,7 +99,7 @@ nodePathMap:
 # sharedFileSystemPath: ""
 
 # Read only from config.json, including on configuration reload.
-# Shared mode uses Exists; remove the label key when the mount is unhealthy.
+# Shared mode uses In ["true"]; set the label to "false" when the mount is unhealthy.
 # Node-local mode uses In, defaulting to kubernetes.io/hostname when unset.
 nodeAffinityKey: ""
 

@@ -28,7 +28,7 @@ func TestS3DFAffinitySource(t *testing.T) {
 		{
 			name:   "shared ConfigMap key",
 			config: `{"sharedFileSystemPath":"/sdf/data/lcls","nodeAffinityKey":"` + s3dfTestKey + `"}`,
-			key:    s3dfTestKey, operator: v1.NodeSelectorOpExists,
+			key:    s3dfTestKey, operator: v1.NodeSelectorOpIn, values: []string{SharedNodeAffinityValue},
 		},
 		{name: "shared without key", config: `{"sharedFileSystemPath":"/sdf/data/lcls"}`},
 		{name: "shared empty key", config: `{"sharedFileSystemPath":"/sdf/data/lcls","nodeAffinityKey":""}`},
@@ -39,12 +39,12 @@ func TestS3DFAffinitySource(t *testing.T) {
 		{
 			name:   "ConfigMap wins over both obsolete interfaces",
 			config: `{"sharedFileSystemPath":"/sdf/data/lcls","nodeAffinityKey":"` + s3dfTestKey + `"}`,
-			key:    s3dfTestKey, operator: v1.NodeSelectorOpExists, legacyKeys: true,
+			key:    s3dfTestKey, operator: v1.NodeSelectorOpIn, values: []string{SharedNodeAffinityValue}, legacyKeys: true,
 		},
 		{
 			name:   "per-class key",
 			config: `{"nodeAffinityKey":"ignored.example/top-level","storageClassConfigs":{"sdf-test":{"sharedFileSystemPath":"/sdf/data/lcls","nodeAffinityKey":"` + s3dfTestKey + `"},"other":{"sharedFileSystemPath":"/other","nodeAffinityKey":"other.example/share"}}}`,
-			key:    s3dfTestKey, operator: v1.NodeSelectorOpExists,
+			key:    s3dfTestKey, operator: v1.NodeSelectorOpIn, values: []string{SharedNodeAffinityValue},
 		},
 		{
 			name:   "per-class key does not inherit",
@@ -102,10 +102,10 @@ func TestS3DFAffinitySource(t *testing.T) {
 				}},
 			}}
 			require.Equal(t, expected, pv.Spec.NodeAffinity)
-			if tt.operator == v1.NodeSelectorOpExists {
+			if tt.node == nil { // shared cases
 				expression, err := json.Marshal(pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0])
 				require.NoError(t, err)
-				require.JSONEq(t, fmt.Sprintf(`{"key":%q,"operator":"Exists"}`, tt.key), string(expression))
+				require.JSONEq(t, fmt.Sprintf(`{"key":%q,"operator":"In","values":["true"]}`, tt.key), string(expression))
 			}
 		})
 	}
@@ -173,7 +173,7 @@ func TestS3DFConcurrentConfigReload(t *testing.T) {
 		pv, _, err := p.Provision(t.Context(), opts)
 		require.NoError(t, err)
 		require.NotNil(t, pv.Spec.NodeAffinity)
-		require.Equal(t, v1.NodeSelectorOpExists, pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0].Operator)
+		require.Equal(t, sharedMountRequirement(pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0].Key), pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0])
 	}
 	require.NoError(t, <-done)
 }
